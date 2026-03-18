@@ -53,7 +53,6 @@ RUN curl -L https://nixos.org/nix/install | sh -s -- --no-daemon
 
 USER root
 
-# Point directly at the actual store binaries, not at /home/dev/.nix-profile.
 RUN NIX_BIN="$(readlink -f /home/dev/.nix-profile/bin/nix)" && \
     NIX_ENV_BIN="$(readlink -f /home/dev/.nix-profile/bin/nix-env)" && \
     NIX_STORE_BIN="$(readlink -f /home/dev/.nix-profile/bin/nix-store)" && \
@@ -65,7 +64,6 @@ RUN NIX_BIN="$(readlink -f /home/dev/.nix-profile/bin/nix)" && \
     ln -sf "$NIX_SHELL_BIN" /usr/local/bin/nix-shell && \
     ln -sf "$NIX_INSTANTIATE_BIN" /usr/local/bin/nix-instantiate
 
-# Clean seed for first-run /nix volume initialization.
 RUN mkdir -p /nix-seed \
  && rsync -a \
       --exclude='/var/nix/gc.lock' \
@@ -80,7 +78,8 @@ RUN mkdir -p /nix-seed \
 ENV PATH=/usr/local/bin:/usr/bin:/bin
 
 COPY container-entrypoint.sh /usr/local/bin/container-entrypoint.sh
-RUN chmod +x /usr/local/bin/container-entrypoint.sh
+COPY ai-sandbox-open-url.sh /usr/local/bin/ai-sandbox-open-url
+RUN chmod +x /usr/local/bin/container-entrypoint.sh /usr/local/bin/ai-sandbox-open-url
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/container-entrypoint.sh"]

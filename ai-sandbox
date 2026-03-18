@@ -5,6 +5,9 @@ IMAGE="${AI_SANDBOX_IMAGE:-ai-sandbox-vscode}"
 HOME_VOLUME="${AI_SANDBOX_HOME_VOLUME:-ai-sandbox-home}"
 NIX_VOLUME="${AI_SANDBOX_NIX_VOLUME:-ai-sandbox-nix}"
 BUILD_CONTEXT="${AI_SANDBOX_BUILD_CONTEXT:-}"
+STATE_DIR="${AI_SANDBOX_STATE_DIR:-$HOME/.local/state/ai-sandbox}"
+
+mkdir -p "$STATE_DIR"
 
 if [[ -z "$BUILD_CONTEXT" || ! -d "$BUILD_CONTEXT" ]]; then
   echo "AI_SANDBOX_BUILD_CONTEXT is not set or invalid." >&2
@@ -17,6 +20,7 @@ Usage:
   ai-sandbox [start] [WORKSPACE] [--flake PATH]
   ai-sandbox shell [WORKSPACE] [--flake PATH]
   ai-sandbox warm [WORKSPACE] [--flake PATH]
+  ai-sandbox open-url URL
   ai-sandbox build-base
   ai-sandbox help
 
@@ -29,17 +33,53 @@ Examples:
   ai-sandbox shell
   ai-sandbox start .
   ai-sandbox warm . --flake ./dev/flake.nix
+  ai-sandbox open-url 'vscode://file/tmp/test'
   ais
 EOF
+}
+
+detect_theme() {
+  local scheme=""
+  if command -v kreadconfig5 >/dev/null 2>&1; then
+    scheme="$(kreadconfig5 --file "$HOME/.config/kdeglobals" --group General --key ColorScheme 2>/dev/null || true)"
+  fi
+  if [[ -z "$scheme" && -f "$HOME/.config/kdeglobals" ]]; then
+    scheme="$(grep -E '^ColorScheme=' "$HOME/.config/kdeglobals" | head -n1 | cut -d= -f2- || true)"
+  fi
+
+  case "${scheme,,}" in
+    *dark*|*black*|*night*)
+      echo "dark"
+      ;;
+    *)
+      echo "light"
+      ;;
+  esac
+}
+
+pick_running_container() {
+  if [[ -f "$STATE_DIR/last-container" ]]; then
+    local c
+    c="$(cat "$STATE_DIR/last-container" 2>/dev/null || true)"
+    if [[ -n "$c" ]] && podman inspect "$c" >/dev/null 2>&1; then
+      if [[ "$(podman inspect -f '{{.State.Running}}' "$c" 2>/dev/null || true)" == "true" ]]; then
+        echo "$c"
+        return 0
+      fi
+    fi
+  fi
+
+  podman ps --filter label=ai-sandbox=true --format '{{.Names}}' | tail -n1
 }
 
 cmd="start"
 workspace="$PWD"
 flake_arg=""
+open_url_arg=""
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    start|shell|warm|build-base|help|-h|--help)
+    start|shell|warm|build-base|open-url|help|-h|--help)
       cmd="$1"
       shift
       ;;
@@ -58,60 +98,104 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      workspace="$(realpath "$1")"
+      if [[ "$cmd" == "open-url" && -z "$open_url_arg" ]]; then
+        open_url_arg="$1"
+      else
+        workspace="$(realpath "$1")"
+      fi
       shift
       ;;
   esac
 done
 
-if [[ "$cmd" == "help" || "$cmd" == "-h" || "$cmd" == "--help" ]]; then
-  usage
-  exit 0
-fi
-
-if [[ "$cmd" == "build-base" ]]; then
-  podman build \
-    -t "$IMAGE" \
-    -f "$BUILD_CONTEXT/Dockerfile" \
-    "$BUILD_CONTEXT"
-  exit 0
-fi
+case "$cmd" in
+  help|-h|--help)
+    usage
+    exit 0
+    ;;
+  build-base)
+    podman build \
+      -t "$IMAGE" \
+      -f "$BUILD_CONTEXT/Dockerfile" \
+      "$BUILD_CONTEXT"
+    exit 0
+    ;;
+  open-url)
+    [[ -n "$open_url_arg" ]] || { echo "open-url requires a URL" >&2; exit 1; }
+    container="$(pick_running_container)"
+    [[ -n "$container" ]] || { echo "No running AI sandbox container found." >&2; exit 1; }
+    exec podman exec "$container" /usr/local/bin/ai-sandbox-open-url "$open_url_arg"
+    ;;
+esac
 
 [[ -d "$workspace" ]] || { echo "Workspace does not exist: $workspace" >&2; exit 1; }
 
 container_name="ai-sandbox-$(echo -n "$workspace" | sha256sum | cut -c1-12)"
-xauth_file="${XAUTHORITY:-$HOME/.Xauthority}"
+echo "$container_name" > "$STATE_DIR/last-container"
 
+xauth_file="${XAUTHORITY:-$HOME/.Xauthority}"
 if [[ ! -f "$xauth_file" ]]; then
   echo "Xauthority file not found: $xauth_file" >&2
   exit 1
 fi
 
-run_container() {
-  local mode="$1"
+theme="$(detect_theme)"
 
+dbus_args=()
+if [[ -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/bus" ]]; then
+  dbus_args=(
+    -e "DBUS_SESSION_BUS_ADDRESS=unix:path=${XDG_RUNTIME_DIR}/bus"
+    -v "${XDG_RUNTIME_DIR}/bus:${XDG_RUNTIME_DIR}/bus:rw"
+    -e "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
+  )
+fi
+
+common_args=(
+  --name "$container_name"
+  --userns=keep-id
+  --user "$(id -u):$(id -g)"
+  --group-add keep-groups
+  --label ai-sandbox=true
+  --label "ai-sandbox.workspace=$workspace"
+  -e "DISPLAY=${DISPLAY:-:0}"
+  -e XAUTHORITY=/tmp/.Xauthority
+  -e HOME=/sandbox-home
+  -e "AI_SANDBOX_MODE=$cmd"
+  -e "AI_SANDBOX_FLAKE=${flake_arg:-}"
+  -e "AI_SANDBOX_THEME=$theme"
+  -v /tmp/.X11-unix:/tmp/.X11-unix:ro
+  -v "$xauth_file:/tmp/.Xauthority:ro"
+  -v "$workspace:/workspace:Z"
+  -v "$HOME_VOLUME:/sandbox-home:Z,U"
+  -v "$NIX_VOLUME:/nix:Z,U"
+  --device /dev/dri
+)
+
+run_detached() {
+  podman run --rm -d \
+    "${common_args[@]}" \
+    "${dbus_args[@]}" \
+    "$IMAGE" >/dev/null
+
+  echo "Started $container_name"
+}
+
+run_interactive() {
   podman run --rm -it \
-    --name "$container_name" \
-    --userns=keep-id \
-    --user "$(id -u):$(id -g)" \
-    --group-add keep-groups \
-    -e DISPLAY="${DISPLAY:-:0}" \
-    -e XAUTHORITY=/tmp/.Xauthority \
-    -e HOME=/sandbox-home \
-    -e AI_SANDBOX_MODE="$mode" \
-    -e AI_SANDBOX_FLAKE="${flake_arg:-}" \
-    -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
-    -v "$xauth_file:/tmp/.Xauthority:ro" \
-    -v "$workspace:/workspace:Z" \
-    -v "$HOME_VOLUME:/sandbox-home:Z,U" \
-    -v "$NIX_VOLUME:/nix:Z,U" \
-    --device /dev/dri \
+    "${common_args[@]}" \
+    "${dbus_args[@]}" \
     "$IMAGE"
 }
 
 case "$cmd" in
-  start) run_container start ;;
-  shell) run_container shell ;;
-  warm)  run_container warm ;;
-  *) usage >&2; exit 1 ;;
+  start)
+    run_detached
+    ;;
+  shell|warm)
+    run_interactive
+    ;;
+  *)
+    usage >&2
+    exit 1
+    ;;
 esac

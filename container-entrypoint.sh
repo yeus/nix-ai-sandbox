@@ -9,8 +9,9 @@ export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 mode="${AI_SANDBOX_MODE:-start}"
 workspace="/workspace"
 flake_input="${AI_SANDBOX_FLAKE:-}"
+theme="${AI_SANDBOX_THEME:-light}"
 
-mkdir -p "$HOME" "$HOME/.vscode-data" "$HOME/.vscode-extensions"
+mkdir -p "$HOME" "$HOME/.vscode-data" "$HOME/.vscode-extensions" "$HOME/.config/Code/User"
 
 seed_nix_if_needed() {
   if command -v nix >/dev/null 2>&1; then
@@ -33,16 +34,30 @@ seed_nix_if_needed() {
   hash -r
 }
 
+ensure_default_vscode_settings() {
+  local settings="$HOME/.config/Code/User/settings.json"
+  if [[ -e "$settings" ]]; then
+    return
+  fi
+
+  local color_theme="Default Light Modern"
+  if [[ "$theme" == "dark" ]]; then
+    color_theme="Default Dark Modern"
+  fi
+
+  cat > "$settings" <<EOF
+{
+  "workbench.colorTheme": "$color_theme",
+  "window.autoDetectColorScheme": false
+}
+EOF
+}
+
 seed_nix_if_needed
+ensure_default_vscode_settings
 
 if ! command -v nix >/dev/null 2>&1; then
   echo "nix still not found after seeding. PATH=$PATH" >&2
-  echo "--- /usr/local/bin/nix ---" >&2
-  ls -l /usr/local/bin/nix >&2 || true
-  echo "--- resolved nix target ---" >&2
-  readlink -f /usr/local/bin/nix >&2 || true
-  echo "--- /nix/store head ---" >&2
-  ls -la /nix/store | head >&2 || true
   exit 1
 fi
 
@@ -68,6 +83,18 @@ resolve_flake_target() {
   echo ""
 }
 
+launch_code() {
+  local target="$1"
+
+  exec bash -lc '
+    code \
+      --verbose \
+      --user-data-dir "$HOME/.vscode-data" \
+      --extensions-dir "$HOME/.vscode-extensions" \
+      "$1"
+  ' _ "$target"
+}
+
 flake_target="$(resolve_flake_target)"
 
 cd "$workspace"
@@ -91,15 +118,15 @@ case "$mode" in
   start)
     if [[ -n "$flake_target" ]]; then
       exec nix develop "$flake_target" --command \
-        code \
-          --user-data-dir "$HOME/.vscode-data" \
-          --extensions-dir "$HOME/.vscode-extensions" \
-          "$workspace"
+        bash -lc '
+          code \
+            --verbose \
+            --user-data-dir "$HOME/.vscode-data" \
+            --extensions-dir "$HOME/.vscode-extensions" \
+            "$1"
+        ' _ "$workspace"
     else
-      exec code \
-        --user-data-dir "$HOME/.vscode-data" \
-        --extensions-dir "$HOME/.vscode-extensions" \
-        "$workspace"
+      launch_code "$workspace"
     fi
     ;;
   *)
