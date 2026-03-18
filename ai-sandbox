@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE="${AI_SANDBOX_IMAGE:-ai-sandbox-vscode}"
+HOME_VOLUME="${AI_SANDBOX_HOME_VOLUME:-ai-sandbox-home}"
+NIX_VOLUME="${AI_SANDBOX_NIX_VOLUME:-ai-sandbox-nix}"
+BUILD_CONTEXT="${AI_SANDBOX_BUILD_CONTEXT:-}"
+
+if [[ -z "$BUILD_CONTEXT" || ! -d "$BUILD_CONTEXT" ]]; then
+  echo "AI_SANDBOX_BUILD_CONTEXT is not set or invalid." >&2
+  exit 1
+fi
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ai-sandbox [start] [WORKSPACE] [--flake PATH]
+  ai-sandbox shell [WORKSPACE] [--flake PATH]
+  ai-sandbox warm [WORKSPACE] [--flake PATH]
+  ai-sandbox build-base
+  ai-sandbox help
+
+Defaults:
+  - no subcommand => start
+  - no workspace  => current directory
+
+Examples:
+  ai-sandbox
+  ai-sandbox shell
+  ai-sandbox start .
+  ai-sandbox warm . --flake ./dev/flake.nix
+  ais
+EOF
+}
+
+cmd="start"
+workspace="$PWD"
+flake_arg=""
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    start|shell|warm|build-base|help|-h|--help)
+      cmd="$1"
+      shift
+      ;;
+    *)
+      cmd="start"
+      ;;
+  esac
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --flake)
+      shift
+      [[ $# -gt 0 ]] || { echo "--flake requires a path" >&2; exit 1; }
+      flake_arg="$(realpath "$1")"
+      shift
+      ;;
+    *)
+      workspace="$(realpath "$1")"
+      shift
+      ;;
+  esac
+done
+
+if [[ "$cmd" == "help" || "$cmd" == "-h" || "$cmd" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ "$cmd" == "build-base" ]]; then
+  podman build \
+    -t "$IMAGE" \
+    -f "$BUILD_CONTEXT/Dockerfile" \
+    "$BUILD_CONTEXT"
+  exit 0
+fi
+
+[[ -d "$workspace" ]] || { echo "Workspace does not exist: $workspace" >&2; exit 1; }
+
+container_name="ai-sandbox-$(echo -n "$workspace" | sha256sum | cut -c1-12)"
+xauth_file="${XAUTHORITY:-$HOME/.Xauthority}"
+
+if [[ ! -f "$xauth_file" ]]; then
+  echo "Xauthority file not found: $xauth_file" >&2
+  exit 1
+fi
+
+run_container() {
+  local mode="$1"
+
+  podman run --rm -it \
+    --name "$container_name" \
+    --userns=keep-id \
+    --user "$(id -u):$(id -g)" \
+    --group-add keep-groups \
+    -e DISPLAY="${DISPLAY:-:0}" \
+    -e XAUTHORITY=/tmp/.Xauthority \
+    -e HOME=/sandbox-home \
+    -e AI_SANDBOX_MODE="$mode" \
+    -e AI_SANDBOX_FLAKE="${flake_arg:-}" \
+    -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
+    -v "$xauth_file:/tmp/.Xauthority:ro" \
+    -v "$workspace:/workspace:Z" \
+    -v "$HOME_VOLUME:/sandbox-home:Z,U" \
+    -v "$NIX_VOLUME:/nix:Z,U" \
+    --device /dev/dri \
+    "$IMAGE"
+}
+
+case "$cmd" in
+  start) run_container start ;;
+  shell) run_container shell ;;
+  warm)  run_container warm ;;
+  *) usage >&2; exit 1 ;;
+esac
