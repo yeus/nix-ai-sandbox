@@ -3,6 +3,7 @@ set -euo pipefail
 
 export HOME="${HOME:-/sandbox-home}"
 export USER="${USER:-sandbox}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}"
 export NIX_CONFIG="experimental-features = nix-command flakes"
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
@@ -11,7 +12,14 @@ workspace="/workspace"
 flake_input="${AI_SANDBOX_FLAKE:-}"
 theme="${AI_SANDBOX_THEME:-light}"
 
-mkdir -p "$HOME" "$HOME/.vscode-data" "$HOME/.vscode-extensions" "$HOME/.config/Code/User"
+mkdir -p \
+  "$HOME" \
+  "$HOME/.vscode-data" \
+  "$HOME/.vscode-extensions" \
+  "$HOME/.config/Code/User" \
+  "$XDG_RUNTIME_DIR"
+
+chmod 700 "$XDG_RUNTIME_DIR" || true
 
 seed_nix_if_needed() {
   if command -v nix >/dev/null 2>&1; then
@@ -61,6 +69,9 @@ if ! command -v nix >/dev/null 2>&1; then
   exit 1
 fi
 
+# Force external URL opens through the host browser via portal.
+export BROWSER=/usr/local/bin/ai-sandbox-xdg-open
+
 resolve_flake_target() {
   if [[ -n "$flake_input" ]]; then
     if [[ -d "$flake_input" ]]; then
@@ -83,21 +94,19 @@ resolve_flake_target() {
   echo ""
 }
 
-launch_code() {
-  local target="$1"
-
-  exec bash -lc '
-    code \
-      --verbose \
-      --user-data-dir "$HOME/.vscode-data" \
-      --extensions-dir "$HOME/.vscode-extensions" \
-      "$1"
-  ' _ "$target"
-}
-
 flake_target="$(resolve_flake_target)"
-
 cd "$workspace"
+
+launch_code_cmd='
+  export BROWSER=/usr/local/bin/ai-sandbox-xdg-open
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}"
+
+  code \
+    --verbose \
+    --user-data-dir "$HOME/.vscode-data" \
+    --extensions-dir "$HOME/.vscode-extensions" \
+    "$1"
+'
 
 case "$mode" in
   warm)
@@ -117,16 +126,9 @@ case "$mode" in
     ;;
   start)
     if [[ -n "$flake_target" ]]; then
-      exec nix develop "$flake_target" --command \
-        bash -lc '
-          code \
-            --verbose \
-            --user-data-dir "$HOME/.vscode-data" \
-            --extensions-dir "$HOME/.vscode-extensions" \
-            "$1"
-        ' _ "$workspace"
+      exec nix develop "$flake_target" --command bash -lc "$launch_code_cmd" _ "$workspace"
     else
-      launch_code "$workspace"
+      exec bash -lc "$launch_code_cmd" _ "$workspace"
     fi
     ;;
   *)

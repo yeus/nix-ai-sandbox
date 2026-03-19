@@ -23,18 +23,6 @@ Usage:
   ai-sandbox open-url URL
   ai-sandbox build-base
   ai-sandbox help
-
-Defaults:
-  - no subcommand => start
-  - no workspace  => current directory
-
-Examples:
-  ai-sandbox
-  ai-sandbox shell
-  ai-sandbox start .
-  ai-sandbox warm . --flake ./dev/flake.nix
-  ai-sandbox open-url 'vscode://file/tmp/test'
-  ais
 EOF
 }
 
@@ -48,12 +36,8 @@ detect_theme() {
   fi
 
   case "${scheme,,}" in
-    *dark*|*black*|*night*)
-      echo "dark"
-      ;;
-    *)
-      echo "light"
-      ;;
+    *dark*|*black*|*night*) echo "dark" ;;
+    *) echo "light" ;;
   esac
 }
 
@@ -114,10 +98,7 @@ case "$cmd" in
     exit 0
     ;;
   build-base)
-    podman build \
-      -t "$IMAGE" \
-      -f "$BUILD_CONTEXT/Dockerfile" \
-      "$BUILD_CONTEXT"
+    podman build -t "$IMAGE" -f "$BUILD_CONTEXT/Dockerfile" "$BUILD_CONTEXT"
     exit 0
     ;;
   open-url)
@@ -134,19 +115,15 @@ container_name="ai-sandbox-$(echo -n "$workspace" | sha256sum | cut -c1-12)"
 echo "$container_name" > "$STATE_DIR/last-container"
 
 xauth_file="${XAUTHORITY:-$HOME/.Xauthority}"
-if [[ ! -f "$xauth_file" ]]; then
-  echo "Xauthority file not found: $xauth_file" >&2
-  exit 1
-fi
+[[ -f "$xauth_file" ]] || { echo "Xauthority file not found: $xauth_file" >&2; exit 1; }
 
 theme="$(detect_theme)"
 
 dbus_args=()
 if [[ -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/bus" ]]; then
   dbus_args=(
-    -e "DBUS_SESSION_BUS_ADDRESS=unix:path=${XDG_RUNTIME_DIR}/bus"
-    -v "${XDG_RUNTIME_DIR}/bus:${XDG_RUNTIME_DIR}/bus:rw"
-    -e "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
+    -e "DBUS_SESSION_BUS_ADDRESS=unix:path=/host-run-user-bus"
+    -v "${XDG_RUNTIME_DIR}/bus:/host-run-user-bus:rw"
   )
 fi
 
@@ -160,6 +137,7 @@ common_args=(
   -e "DISPLAY=${DISPLAY:-:0}"
   -e XAUTHORITY=/tmp/.Xauthority
   -e HOME=/sandbox-home
+  -e XDG_RUNTIME_DIR=/tmp/xdg-runtime
   -e "AI_SANDBOX_MODE=$cmd"
   -e "AI_SANDBOX_FLAKE=${flake_arg:-}"
   -e "AI_SANDBOX_THEME=$theme"
@@ -176,7 +154,6 @@ run_detached() {
     "${common_args[@]}" \
     "${dbus_args[@]}" \
     "$IMAGE" >/dev/null
-
   echo "Started $container_name"
 }
 
@@ -188,14 +165,7 @@ run_interactive() {
 }
 
 case "$cmd" in
-  start)
-    run_detached
-    ;;
-  shell|warm)
-    run_interactive
-    ;;
-  *)
-    usage >&2
-    exit 1
-    ;;
+  start) run_detached ;;
+  shell|warm) run_interactive ;;
+  *) usage >&2; exit 1 ;;
 esac

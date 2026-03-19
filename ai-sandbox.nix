@@ -8,7 +8,12 @@ let
     cp ${./Dockerfile} "$out/Dockerfile"
     cp ${./container-entrypoint.sh} "$out/container-entrypoint.sh"
     cp ${./ai-sandbox-open-url.sh} "$out/ai-sandbox-open-url.sh"
-    chmod 0644 "$out/Dockerfile" "$out/container-entrypoint.sh" "$out/ai-sandbox-open-url.sh"
+    cp ${./ai-sandbox-xdg-open.sh} "$out/ai-sandbox-xdg-open.sh"
+    chmod 0644 \
+      "$out/Dockerfile" \
+      "$out/container-entrypoint.sh" \
+      "$out/ai-sandbox-open-url.sh" \
+      "$out/ai-sandbox-xdg-open.sh"
   '';
 
   aiSandboxScript = pkgs.writeShellScriptBin "ai-sandbox" ''
@@ -132,10 +137,9 @@ in
       noDisplay = true;
     };
 
-    xdg.mimeApps.enable = true;
-    xdg.mimeApps.defaultApplications = {
-      "x-scheme-handler/vscode" = [ "ai-sandbox-vscode-url-handler.desktop" ];
-      "x-scheme-handler/vscode-insiders" = [ "ai-sandbox-vscode-url-handler.desktop" ];
-    };
+    home.activation.aiSandboxMime = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      ${pkgs.xdg-utils}/bin/xdg-mime default ai-sandbox-vscode-url-handler.desktop x-scheme-handler/vscode || true
+      ${pkgs.xdg-utils}/bin/xdg-mime default ai-sandbox-vscode-url-handler.desktop x-scheme-handler/vscode-insiders || true
+    '';
   };
 }

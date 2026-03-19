@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     libcanberra-gtk3-module \
     libdrm2 \
     libgbm1 \
+    libglib2.0-bin \
     libgtk-3-0 \
     libnotify4 \
     libnss3 \
@@ -75,11 +76,16 @@ RUN mkdir -p /nix-seed \
       /nix/ /nix-seed/ \
  && chmod -R a+rX /nix-seed
 
-ENV PATH=/usr/local/bin:/usr/bin:/bin
-
 COPY container-entrypoint.sh /usr/local/bin/container-entrypoint.sh
 COPY ai-sandbox-open-url.sh /usr/local/bin/ai-sandbox-open-url
-RUN chmod +x /usr/local/bin/container-entrypoint.sh /usr/local/bin/ai-sandbox-open-url
+COPY ai-sandbox-xdg-open.sh /usr/local/bin/ai-sandbox-xdg-open
+
+RUN chmod +x \
+    /usr/local/bin/container-entrypoint.sh \
+    /usr/local/bin/ai-sandbox-open-url \
+    /usr/local/bin/ai-sandbox-xdg-open
+
+ENV PATH=/usr/local/bin:/usr/bin:/bin
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/container-entrypoint.sh"]
