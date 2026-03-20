@@ -1,6 +1,6 @@
 # AI sandbox for Podman + real VS Code + project flakes
 
-This is the flat-folder version.
+This is the flat-folder version and is intended to be shareable via `git subtree`.
 
 Files in this folder:
 
@@ -132,6 +132,33 @@ sudo nixos-rebuild switch --flake .
 
 After that, `ai-sandbox` is available everywhere.
 
+## Share this folder as a Git subtree
+
+Create a split branch from this repo and push it to a dedicated remote:
+
+```bash
+git subtree split --prefix=ai-sandbox --branch ai-sandbox-split
+git push git@github.com:<org>/<ai-sandbox-repo>.git ai-sandbox-split:main
+```
+
+Consume it from another repository:
+
+```bash
+git subtree add --prefix=modules/ai-sandbox git@github.com:<org>/<ai-sandbox-repo>.git main --squash
+```
+
+Pull updates later:
+
+```bash
+git subtree pull --prefix=modules/ai-sandbox git@github.com:<org>/<ai-sandbox-repo>.git main --squash
+```
+
+Push local subtree changes back to the subtree remote:
+
+```bash
+git subtree push --prefix=ai-sandbox git@github.com:<org>/<ai-sandbox-repo>.git main
+```
+
 ## Direnv usage in projects
 
 Do **not** auto-launch the container from `direnv`. That gets annoying fast.
@@ -167,6 +194,7 @@ sandbox-start
 
 ## Notes
 
+- This has only been tested with Nix Home Manager so far.
 - The sandbox still has X11 access. That is the weakest part of this design.
 - The repo is mounted read/write on purpose.
 - Host `$HOME` is not mounted.
