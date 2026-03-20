@@ -128,3 +128,4 @@ sandbox-start
 - Host `$HOME` is not mounted.
 - Host `/nix` is not mounted.
 - The shared `/nix` volume makes repeated launches much faster after the first warmup.
+- `ai-sandbox start/shell/warm` now auto-register a host URL handler for `vscode://` and `vscode-insiders://` so OAuth callbacks (for example GitHub login) route back into the running sandbox container.

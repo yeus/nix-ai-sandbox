@@ -82,12 +82,13 @@ let
     }
 
     container="$(pick_container)"
-    if [ -z "$container" ]; then
-      echo "No running AI sandbox container found for URL callback." >&2
-      exit 1
+    if [ -n "$container" ]; then
+      exec podman exec "$container" /usr/local/bin/ai-sandbox-open-url "$url"
     fi
 
-    exec podman exec "$container" /usr/local/bin/ai-sandbox-open-url "$url"
+    exec code --open-url "$url"
+    echo "No running AI sandbox container found for URL callback, and host VS Code failed to handle --open-url." >&2
+    exit 1
   '';
 in
 {
@@ -138,8 +139,10 @@ in
     };
 
     home.activation.aiSandboxMime = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-      ${pkgs.xdg-utils}/bin/xdg-mime default ai-sandbox-vscode-url-handler.desktop x-scheme-handler/vscode || true
-      ${pkgs.xdg-utils}/bin/xdg-mime default ai-sandbox-vscode-url-handler.desktop x-scheme-handler/vscode-insiders || true
+      ${pkgs.xdg-utils}/bin/xdg-mime default ai-sandbox-vscode-url-handler.desktop x-scheme-handler/vscode >/dev/null 2>&1 || true
+      ${pkgs.xdg-utils}/bin/xdg-mime default ai-sandbox-vscode-url-handler.desktop x-scheme-handler/vscode-insiders >/dev/null 2>&1 || true
+      ${pkgs.xdg-utils}/bin/xdg-settings set default-url-scheme-handler vscode ai-sandbox-vscode-url-handler.desktop >/dev/null 2>&1 || true
+      ${pkgs.xdg-utils}/bin/xdg-settings set default-url-scheme-handler vscode-insiders ai-sandbox-vscode-url-handler.desktop >/dev/null 2>&1 || true
     '';
   };
 }

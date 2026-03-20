@@ -26,6 +26,44 @@ Usage:
 EOF
 }
 
+ensure_vscode_url_handler() {
+  local desktop_dir desktop_file ai_sandbox_cmd
+  desktop_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  desktop_file="$desktop_dir/ai-sandbox-vscode-url-handler.desktop"
+
+  ai_sandbox_cmd="$(command -v ai-sandbox || true)"
+  if [[ -z "$ai_sandbox_cmd" ]]; then
+    ai_sandbox_cmd="$(realpath "$0")"
+  fi
+
+  mkdir -p "$desktop_dir"
+  cat > "$desktop_file" <<EOF
+[Desktop Entry]
+Name=AI Sandbox VS Code URL Handler
+Exec=$ai_sandbox_cmd open-url %u
+Terminal=false
+Type=Application
+MimeType=x-scheme-handler/vscode;x-scheme-handler/vscode-insiders;
+Categories=Development;
+NoDisplay=true
+EOF
+
+  if command -v xdg-mime >/dev/null 2>&1; then
+    xdg-mime default ai-sandbox-vscode-url-handler.desktop x-scheme-handler/vscode >/dev/null 2>&1 || true
+    xdg-mime default ai-sandbox-vscode-url-handler.desktop x-scheme-handler/vscode-insiders >/dev/null 2>&1 || true
+  fi
+
+  if command -v xdg-settings >/dev/null 2>&1; then
+    xdg-settings set default-url-scheme-handler vscode ai-sandbox-vscode-url-handler.desktop >/dev/null 2>&1 || true
+    xdg-settings set default-url-scheme-handler vscode-insiders ai-sandbox-vscode-url-handler.desktop >/dev/null 2>&1 || true
+  fi
+
+  if command -v gio >/dev/null 2>&1; then
+    gio mime x-scheme-handler/vscode ai-sandbox-vscode-url-handler.desktop >/dev/null 2>&1 || true
+    gio mime x-scheme-handler/vscode-insiders ai-sandbox-vscode-url-handler.desktop >/dev/null 2>&1 || true
+  fi
+}
+
 detect_theme() {
   local scheme=""
   if command -v kreadconfig5 >/dev/null 2>&1; then
@@ -92,6 +130,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$cmd" == "start" || "$cmd" == "shell" || "$cmd" == "warm" ]]; then
+  ensure_vscode_url_handler
+fi
+
 case "$cmd" in
   help|-h|--help)
     usage
@@ -104,8 +146,12 @@ case "$cmd" in
   open-url)
     [[ -n "$open_url_arg" ]] || { echo "open-url requires a URL" >&2; exit 1; }
     container="$(pick_running_container)"
-    [[ -n "$container" ]] || { echo "No running AI sandbox container found." >&2; exit 1; }
-    exec podman exec "$container" /usr/local/bin/ai-sandbox-open-url "$open_url_arg"
+    if [[ -n "$container" ]]; then
+      exec podman exec "$container" /usr/local/bin/ai-sandbox-open-url "$open_url_arg"
+    fi
+    exec code --open-url "$open_url_arg"
+    echo "No running AI sandbox container found, and host VS Code failed to handle --open-url." >&2
+    exit 1
     ;;
 esac
 
