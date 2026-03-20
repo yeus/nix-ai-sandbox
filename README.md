@@ -195,6 +195,8 @@ sandbox-start
 ## Notes
 
 - This has only been tested with Nix Home Manager so far.
+- This has been tested with an X.org server; it will likely not work with Wayland yet.
+- Contributions are welcome.
 - The sandbox still has X11 access. That is the weakest part of this design.
 - The repo is mounted read/write on purpose.
 - Host `$HOME` is not mounted.
@@ -203,3 +205,7 @@ sandbox-start
 - Storage defaults to `~/.cache/ai-sandbox/{home,nix}` and is directly manageable as your user on the host.
 - `ai-sandbox start/shell/warm` now auto-register a host URL handler for `vscode://` and `vscode-insiders://` so OAuth callbacks (for example GitHub login) route back into the running sandbox container.
 - Network mode defaults to `host`, which makes `http://localhost:<port>/...` OAuth callbacks work generically across services because host browser localhost and container localhost are shared.
+
+## License
+
+MIT. See `LICENSE`.
