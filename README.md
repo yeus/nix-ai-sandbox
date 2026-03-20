@@ -55,6 +55,13 @@ ai-sandbox warm . --flake ../some/other/flake-project
 
 The workspace is still the first positional directory. `--flake` only changes which flake gets used for `nix develop`.
 
+Override network mode (default is `host` for localhost OAuth callback compatibility):
+
+```bash
+ai-sandbox start . --network host
+ai-sandbox start . --network bridge
+```
+
 ## Recommended NixOS integration
 
 Put this whole folder somewhere in your NixOS repo, for example:
@@ -129,3 +136,4 @@ sandbox-start
 - Host `/nix` is not mounted.
 - The shared `/nix` volume makes repeated launches much faster after the first warmup.
 - `ai-sandbox start/shell/warm` now auto-register a host URL handler for `vscode://` and `vscode-insiders://` so OAuth callbacks (for example GitHub login) route back into the running sandbox container.
+- Network mode defaults to `host`, which makes `http://localhost:<port>/...` OAuth callbacks work generically across services because host browser localhost and container localhost are shared.

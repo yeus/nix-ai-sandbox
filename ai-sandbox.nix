@@ -22,6 +22,7 @@ let
     export AI_SANDBOX_NIX_VOLUME=${lib.escapeShellArg cfg.nixVolumeName}
     export AI_SANDBOX_BUILD_CONTEXT=${lib.escapeShellArg aiSandboxFiles}
     export AI_SANDBOX_STATE_DIR=${lib.escapeShellArg cfg.stateDir}
+    export AI_SANDBOX_NETWORK_MODE=${lib.escapeShellArg cfg.networkMode}
     export PATH=${lib.makeBinPath [
       pkgs.podman
       pkgs.coreutils
@@ -113,6 +114,12 @@ in
     stateDir = lib.mkOption {
       type = lib.types.str;
       default = "${config.home.homeDirectory}/.local/state/ai-sandbox";
+    };
+
+    networkMode = lib.mkOption {
+      type = lib.types.enum [ "host" "bridge" ];
+      default = "host";
+      description = "Container network mode. Use host to support localhost OAuth callbacks generically.";
     };
   };
 

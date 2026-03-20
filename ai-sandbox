@@ -6,6 +6,7 @@ HOME_VOLUME="${AI_SANDBOX_HOME_VOLUME:-ai-sandbox-home}"
 NIX_VOLUME="${AI_SANDBOX_NIX_VOLUME:-ai-sandbox-nix}"
 BUILD_CONTEXT="${AI_SANDBOX_BUILD_CONTEXT:-}"
 STATE_DIR="${AI_SANDBOX_STATE_DIR:-$HOME/.local/state/ai-sandbox}"
+NETWORK_MODE="${AI_SANDBOX_NETWORK_MODE:-host}"
 
 mkdir -p "$STATE_DIR"
 
@@ -17,9 +18,9 @@ fi
 usage() {
   cat <<'EOF'
 Usage:
-  ai-sandbox [start] [WORKSPACE] [--flake PATH]
-  ai-sandbox shell [WORKSPACE] [--flake PATH]
-  ai-sandbox warm [WORKSPACE] [--flake PATH]
+  ai-sandbox [start] [WORKSPACE] [--flake PATH] [--network host|bridge]
+  ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge]
+  ai-sandbox warm [WORKSPACE] [--flake PATH] [--network host|bridge]
   ai-sandbox open-url URL
   ai-sandbox build-base
   ai-sandbox help
@@ -119,6 +120,12 @@ while [[ $# -gt 0 ]]; do
       flake_arg="$(realpath "$1")"
       shift
       ;;
+    --network)
+      shift
+      [[ $# -gt 0 ]] || { echo "--network requires host or bridge" >&2; exit 1; }
+      NETWORK_MODE="$1"
+      shift
+      ;;
     *)
       if [[ "$cmd" == "open-url" && -z "$open_url_arg" ]]; then
         open_url_arg="$1"
@@ -129,6 +136,14 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+case "$NETWORK_MODE" in
+  host|bridge) ;;
+  *)
+    echo "Invalid network mode: $NETWORK_MODE (expected host or bridge)" >&2
+    exit 1
+    ;;
+esac
 
 if [[ "$cmd" == "start" || "$cmd" == "shell" || "$cmd" == "warm" ]]; then
   ensure_vscode_url_handler
@@ -195,9 +210,15 @@ common_args=(
   --device /dev/dri
 )
 
+network_args=()
+if [[ "$NETWORK_MODE" == "host" ]]; then
+  network_args=(--network host)
+fi
+
 run_detached() {
   podman run --rm -d \
     "${common_args[@]}" \
+    "${network_args[@]}" \
     "${dbus_args[@]}" \
     "$IMAGE" >/dev/null
   echo "Started $container_name"
@@ -206,6 +227,7 @@ run_detached() {
 run_interactive() {
   podman run --rm -it \
     "${common_args[@]}" \
+    "${network_args[@]}" \
     "${dbus_args[@]}" \
     "$IMAGE"
 }
