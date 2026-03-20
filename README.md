@@ -13,11 +13,12 @@ Files in this folder:
 ## What it does
 
 - builds one global Ubuntu image with real Microsoft VS Code and Nix
-- uses one shared Podman volume for `/nix`
-- uses one shared Podman volume for `/home/dev`
-- mounts only the current project into `/workspace`
+- uses bind-mounted host directories for `/nix` and sandbox home (defaults: `~/.cache/ai-sandbox/nix` and `~/.cache/ai-sandbox/home`)
+- mounts the current project at `/workspace`
+- if the project is a Git submodule, mounts the top superproject at `/workspace` and opens the submodule path inside it (preserves nested submodule `.git` path resolution)
 - if a flake is available, launches via `nix develop`
 - if no flake is available, launches plain VS Code / plain shell
+- supports multiple concurrent containers per workspace (auto instance names, optional `--instance`)
 
 ## Commands
 
@@ -27,7 +28,19 @@ Build/update the base image:
 ai-sandbox build-base
 ```
 
-Warm the current project flake into the shared `/nix` volume:
+Rebuild the base image from scratch (remove old image tag first, keep storage dirs):
+
+```bash
+ai-sandbox rebuild
+```
+
+Reset sandbox storage (clear `~/.cache/ai-sandbox/nix` and `~/.cache/ai-sandbox/home` by default):
+
+```bash
+ai-sandbox reset-storage
+```
+
+Warm the current project flake into the shared `/nix` storage directory:
 
 ```bash
 ai-sandbox warm .
@@ -39,10 +52,34 @@ Start VS Code for the current directory:
 ai-sandbox start .
 ```
 
+By default, `start` now streams startup logs (including flake/Nix setup) and auto-detaches once VS Code launch begins.
+
+Start and continue following logs even after VS Code launch:
+
+```bash
+ai-sandbox start . --logs
+```
+
+Start with a stable instance suffix (useful for multiple VS Code windows/workspaces side by side):
+
+```bash
+ai-sandbox start . --instance vscode-a
+ai-sandbox start . --instance vscode-b
+```
+
 Open an interactive shell in the sandbox:
 
 ```bash
 ai-sandbox shell .
+```
+
+The shell prompt now includes a clear `AI-SANDBOX` marker, project name, directory, and Git branch/status (Starship-based, matching the host `tom_shell.nix` style).
+
+Show logs from an existing sandbox container:
+
+```bash
+ai-sandbox logs .        # one-shot
+ai-sandbox logs . -f     # follow
 ```
 
 Override the flake location:
@@ -134,6 +171,7 @@ sandbox-start
 - The repo is mounted read/write on purpose.
 - Host `$HOME` is not mounted.
 - Host `/nix` is not mounted.
-- The shared `/nix` volume makes repeated launches much faster after the first warmup.
+- The shared bind-mounted storage makes repeated launches much faster after the first warmup.
+- Storage defaults to `~/.cache/ai-sandbox/{home,nix}` and is directly manageable as your user on the host.
 - `ai-sandbox start/shell/warm` now auto-register a host URL handler for `vscode://` and `vscode-insiders://` so OAuth callbacks (for example GitHub login) route back into the running sandbox container.
 - Network mode defaults to `host`, which makes `http://localhost:<port>/...` OAuth callbacks work generically across services because host browser localhost and container localhost are shared.

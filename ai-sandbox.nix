@@ -18,8 +18,8 @@ let
 
   aiSandboxScript = pkgs.writeShellScriptBin "ai-sandbox" ''
     export AI_SANDBOX_IMAGE=${lib.escapeShellArg cfg.imageName}
-    export AI_SANDBOX_HOME_VOLUME=${lib.escapeShellArg cfg.homeVolumeName}
-    export AI_SANDBOX_NIX_VOLUME=${lib.escapeShellArg cfg.nixVolumeName}
+    export AI_SANDBOX_HOME_STORAGE=${lib.escapeShellArg cfg.homeStorage}
+    export AI_SANDBOX_NIX_STORAGE=${lib.escapeShellArg cfg.nixStorage}
     export AI_SANDBOX_BUILD_CONTEXT=${lib.escapeShellArg aiSandboxFiles}
     export AI_SANDBOX_STATE_DIR=${lib.escapeShellArg cfg.stateDir}
     export AI_SANDBOX_NETWORK_MODE=${lib.escapeShellArg cfg.networkMode}
@@ -79,7 +79,7 @@ let
       podman ps \
         --filter label=ai-sandbox=true \
         --format '{{.Names}}' \
-        | tail -n 1
+        | head -n 1
     }
 
     container="$(pick_container)"
@@ -101,14 +101,16 @@ in
       default = "ai-sandbox-vscode";
     };
 
-    homeVolumeName = lib.mkOption {
+    homeStorage = lib.mkOption {
       type = lib.types.str;
-      default = "ai-sandbox-home";
+      default = "${config.home.homeDirectory}/.cache/ai-sandbox/home";
+      description = "Absolute host path (preferred) or Podman volume name for sandbox HOME storage.";
     };
 
-    nixVolumeName = lib.mkOption {
+    nixStorage = lib.mkOption {
       type = lib.types.str;
-      default = "ai-sandbox-nix";
+      default = "${config.home.homeDirectory}/.cache/ai-sandbox/nix";
+      description = "Absolute host path (preferred) or Podman volume name for sandbox /nix storage.";
     };
 
     stateDir = lib.mkOption {

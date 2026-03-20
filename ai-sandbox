@@ -2,8 +2,8 @@
 set -euo pipefail
 
 IMAGE="${AI_SANDBOX_IMAGE:-ai-sandbox-vscode}"
-HOME_VOLUME="${AI_SANDBOX_HOME_VOLUME:-ai-sandbox-home}"
-NIX_VOLUME="${AI_SANDBOX_NIX_VOLUME:-ai-sandbox-nix}"
+HOME_STORAGE="${AI_SANDBOX_HOME_STORAGE:-${AI_SANDBOX_HOME_VOLUME:-$HOME/.cache/ai-sandbox/home}}"
+NIX_STORAGE="${AI_SANDBOX_NIX_STORAGE:-${AI_SANDBOX_NIX_VOLUME:-$HOME/.cache/ai-sandbox/nix}}"
 BUILD_CONTEXT="${AI_SANDBOX_BUILD_CONTEXT:-}"
 STATE_DIR="${AI_SANDBOX_STATE_DIR:-$HOME/.local/state/ai-sandbox}"
 NETWORK_MODE="${AI_SANDBOX_NETWORK_MODE:-host}"
@@ -18,13 +18,30 @@ fi
 usage() {
   cat <<'EOF'
 Usage:
-  ai-sandbox [start] [WORKSPACE] [--flake PATH] [--network host|bridge]
-  ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge]
-  ai-sandbox warm [WORKSPACE] [--flake PATH] [--network host|bridge]
+  ai-sandbox [start] [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--logs]
+  ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME]
+  ai-sandbox warm [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME]
+  ai-sandbox logs [WORKSPACE] [-f|--follow]
   ai-sandbox open-url URL
   ai-sandbox build-base
+  ai-sandbox rebuild
+  ai-sandbox reset-storage
+  ai-sandbox reset-volumes  # alias for reset-storage
   ai-sandbox help
 EOF
+}
+
+follow_startup_logs_until_vscode() {
+  local container="$1"
+  local marker="AI_SANDBOX_READY_VSCODE:"
+  echo "Streaming startup logs until VS Code launches..."
+  (
+    set +e
+    set +o pipefail
+    podman logs -f "$container" 2>&1 | awk -v marker="$marker" '
+      { print; fflush(); if (index($0, marker)) exit 0 }
+    '
+  ) || true
 }
 
 ensure_vscode_url_handler() {
@@ -92,17 +109,44 @@ pick_running_container() {
     fi
   fi
 
-  podman ps --filter label=ai-sandbox=true --format '{{.Names}}' | tail -n1
+  podman ps --filter label=ai-sandbox=true --format '{{.Names}}' | head -n1
+}
+
+pick_running_container_for_workspace() {
+  local workspace_path="$1"
+
+  podman ps \
+    --filter label=ai-sandbox=true \
+    --filter "label=ai-sandbox.workspace=$workspace_path" \
+    --format '{{.Names}}' | head -n1
+}
+
+sanitize_instance_name() {
+  local raw="$1"
+  local cleaned
+  cleaned="$(echo -n "$raw" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_.-' '-')"
+  cleaned="${cleaned#-}"
+  cleaned="${cleaned%-}"
+
+  if [[ -z "$cleaned" ]]; then
+    echo "Invalid --instance value: '$raw' (expected letters, numbers, ., _, -)" >&2
+    exit 1
+  fi
+
+  echo "$cleaned"
 }
 
 cmd="start"
 workspace="$PWD"
 flake_arg=""
 open_url_arg=""
+instance_arg=""
+follow_logs_on_start=0
+logs_follow=0
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    start|shell|warm|build-base|open-url|help|-h|--help)
+    start|shell|warm|logs|build-base|rebuild|reset-storage|reset-volumes|open-url|help|-h|--help)
       cmd="$1"
       shift
       ;;
@@ -124,6 +168,20 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 ]] || { echo "--network requires host or bridge" >&2; exit 1; }
       NETWORK_MODE="$1"
+      shift
+      ;;
+    --instance)
+      shift
+      [[ $# -gt 0 ]] || { echo "--instance requires a name" >&2; exit 1; }
+      instance_arg="$(sanitize_instance_name "$1")"
+      shift
+      ;;
+    --logs)
+      follow_logs_on_start=1
+      shift
+      ;;
+    -f|--follow)
+      logs_follow=1
       shift
       ;;
     *)
@@ -149,6 +207,11 @@ if [[ "$cmd" == "start" || "$cmd" == "shell" || "$cmd" == "warm" ]]; then
   ensure_vscode_url_handler
 fi
 
+if [[ "$cmd" != "logs" ]] && [[ "$logs_follow" -eq 1 ]]; then
+  echo "-f/--follow is only valid with the logs command." >&2
+  exit 1
+fi
+
 case "$cmd" in
   help|-h|--help)
     usage
@@ -156,6 +219,56 @@ case "$cmd" in
     ;;
   build-base)
     podman build -t "$IMAGE" -f "$BUILD_CONTEXT/Dockerfile" "$BUILD_CONTEXT"
+    exit 0
+    ;;
+  rebuild)
+    if podman image exists "$IMAGE"; then
+      podman rmi -f "$IMAGE" >/dev/null
+    fi
+    podman build -t "$IMAGE" -f "$BUILD_CONTEXT/Dockerfile" "$BUILD_CONTEXT"
+    exit 0
+    ;;
+  logs)
+    if [[ -n "${workspace:-}" && -d "$workspace" ]]; then
+      workspace="$(realpath "$workspace")"
+      target_container="$(pick_running_container_for_workspace "$workspace")"
+      [[ -n "${target_container:-}" ]] || target_container="$(pick_running_container)"
+    else
+      target_container="$(pick_running_container)"
+    fi
+
+    [[ -n "${target_container:-}" ]] || { echo "No AI sandbox container found." >&2; exit 1; }
+    if [[ "$logs_follow" -eq 1 ]]; then
+      exec podman logs -f "$target_container"
+    else
+      exec podman logs "$target_container"
+    fi
+    ;;
+  reset-storage|reset-volumes)
+    # Stop/remove running AI sandbox containers first so storage can be removed.
+    mapfile -t sandbox_containers < <(podman ps -aq --filter label=ai-sandbox=true)
+    if [[ ${#sandbox_containers[@]} -gt 0 ]]; then
+      podman rm -f "${sandbox_containers[@]}" >/dev/null
+    fi
+
+    for storage in "$NIX_STORAGE" "$HOME_STORAGE"; do
+      if [[ "$storage" == /* ]]; then
+        case "$storage" in
+          "/"|"")
+            echo "Refusing to reset unsafe storage path: $storage" >&2
+            exit 1
+            ;;
+        esac
+        rm -rf -- "$storage"
+        mkdir -p -- "$storage"
+      else
+        if podman volume exists "$storage"; then
+          podman volume rm -f "$storage" >/dev/null
+        fi
+      fi
+    done
+
+    echo "Reset storage: $NIX_STORAGE, $HOME_STORAGE"
     exit 0
     ;;
   open-url)
@@ -171,8 +284,68 @@ case "$cmd" in
 esac
 
 [[ -d "$workspace" ]] || { echo "Workspace does not exist: $workspace" >&2; exit 1; }
+project_name="$(basename "$workspace")"
 
-container_name="ai-sandbox-$(echo -n "$workspace" | sha256sum | cut -c1-12)"
+home_mount_spec=""
+nix_mount_spec=""
+if [[ "$HOME_STORAGE" == /* ]]; then
+  mkdir -p "$HOME_STORAGE"
+  home_mount_spec="$HOME_STORAGE:/sandbox-home:Z"
+else
+  home_mount_spec="$HOME_STORAGE:/sandbox-home:Z,U"
+fi
+
+if [[ "$NIX_STORAGE" == /* ]]; then
+  mkdir -p "$NIX_STORAGE"
+  nix_mount_spec="$NIX_STORAGE:/nix:Z"
+else
+  nix_mount_spec="$NIX_STORAGE:/nix:Z,U"
+fi
+
+mount_root="$workspace"
+container_workspace="/workspace"
+
+# Preserve parent directory depth for submodule workspaces by mounting the top
+# superproject root and opening the requested workspace path underneath it.
+if command -v git >/dev/null 2>&1 && git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  probe="$workspace"
+  while true; do
+    superproject="$(git -C "$probe" rev-parse --show-superproject-working-tree 2>/dev/null || true)"
+    [[ -n "$superproject" ]] || break
+    probe="$(realpath "$superproject")"
+  done
+
+  if [[ "$probe" != "$workspace" ]]; then
+    mount_root="$probe"
+    workspace_rel="$(realpath --relative-to="$mount_root" "$workspace")"
+    container_workspace="/workspace/$workspace_rel"
+  fi
+fi
+
+flake_arg_container="${flake_arg:-}"
+if [[ -n "${flake_arg:-}" ]]; then
+  if [[ "$flake_arg" == "$mount_root" || "$flake_arg" == "$mount_root/"* ]]; then
+    flake_rel="$(realpath --relative-to="$mount_root" "$flake_arg")"
+    if [[ "$flake_rel" == "." ]]; then
+      flake_arg_container="/workspace"
+    else
+      flake_arg_container="/workspace/$flake_rel"
+    fi
+  fi
+fi
+
+workspace_hash="$(echo -n "$workspace" | sha256sum | cut -c1-12)"
+base_container_name="ai-sandbox-$workspace_hash"
+if [[ -n "$instance_arg" ]]; then
+  container_name="$base_container_name-$instance_arg"
+else
+  # Avoid SIGPIPE/pipefail exits from `tr ... | head` under `set -euo pipefail`.
+  rand_suffix="$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+  auto_instance="$(date +%Y%m%d-%H%M%S)-${rand_suffix}"
+  container_name="$base_container_name-$auto_instance"
+  instance_arg="$auto_instance"
+fi
+
 echo "$container_name" > "$STATE_DIR/last-container"
 
 xauth_file="${XAUTHORITY:-$HOME/.Xauthority}"
@@ -195,18 +368,23 @@ common_args=(
   --group-add keep-groups
   --label ai-sandbox=true
   --label "ai-sandbox.workspace=$workspace"
+  --label "ai-sandbox.workspace-hash=$workspace_hash"
+  --label "ai-sandbox.instance=$instance_arg"
   -e "DISPLAY=${DISPLAY:-:0}"
   -e XAUTHORITY=/tmp/.Xauthority
   -e HOME=/sandbox-home
   -e XDG_RUNTIME_DIR=/tmp/xdg-runtime
   -e "AI_SANDBOX_MODE=$cmd"
-  -e "AI_SANDBOX_FLAKE=${flake_arg:-}"
+  -e "AI_SANDBOX_FLAKE=$flake_arg_container"
+  -e "AI_SANDBOX_WORKSPACE=$container_workspace"
+  -e "AI_SANDBOX_PROJECT_NAME=$project_name"
+  -e "AI_SANDBOX_INSTANCE_NAME=$instance_arg"
   -e "AI_SANDBOX_THEME=$theme"
   -v /tmp/.X11-unix:/tmp/.X11-unix:ro
   -v "$xauth_file:/tmp/.Xauthority:ro"
-  -v "$workspace:/workspace:Z"
-  -v "$HOME_VOLUME:/sandbox-home:Z,U"
-  -v "$NIX_VOLUME:/nix:Z,U"
+  -v "$mount_root:/workspace:Z"
+  -v "$home_mount_spec"
+  -v "$nix_mount_spec"
   --device /dev/dri
 )
 
@@ -222,6 +400,11 @@ run_detached() {
     "${dbus_args[@]}" \
     "$IMAGE" >/dev/null
   echo "Started $container_name"
+  follow_startup_logs_until_vscode "$container_name"
+  if [[ "$follow_logs_on_start" -eq 1 ]]; then
+    echo "Continuing to follow logs for $container_name (Ctrl-C to stop following; container keeps running)..."
+    podman logs -f --tail 0 "$container_name"
+  fi
 }
 
 run_interactive() {

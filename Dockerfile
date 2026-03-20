@@ -8,8 +8,12 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     dbus-x11 \
+    fd-find \
+    file \
     git \
     gnupg \
+    jq \
+    less \
     libasound2t64 \
     libatspi2.0-0 \
     libcanberra-gtk3-module \
@@ -27,13 +31,20 @@ RUN apt-get update && apt-get install -y \
     mesa-utils \
     procps \
     rsync \
+    ripgrep \
     software-properties-common \
     sudo \
+    tree \
+    unzip \
     wget \
     xauth \
     xdg-utils \
     xz-utils \
+    zip \
  && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://starship.rs/install.sh | sh -s -- --yes
+RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
 RUN wget -O /tmp/code.deb "https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64" \
  && apt-get update \
