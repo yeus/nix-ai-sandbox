@@ -1,5 +1,7 @@
 # AI sandbox for Podman + real VS Code + project flakes
 
+Run VS Code and AI coding agents inside an isolated container, while keeping your development environment defined by your project flake.
+
 This is the flat-folder version and is intended to be shareable via `git subtree`.
 
 Files in this folder:
@@ -9,6 +11,28 @@ Files in this folder:
 - `ai-sandbox`
 - `ai-sandbox.nix`
 - `README.md`
+
+## Why this exists
+
+With modern AI workflows, the bigger risk is often not just CLI tools, but VS Code plugins.
+
+Coding-agent extensions can:
+- execute shell commands
+- modify your repository
+- access tokens and credentials
+
+In many cases you do not fully know what they do, and some are not even open source.
+
+Even if a tool sandboxes parts of its execution, VS Code itself still usually runs on your host machine.
+
+`nix-ai-sandbox` takes a different approach:
+- VS Code runs inside a container
+- extensions run inside that container
+- your host `$HOME` is not mounted
+- your host `/nix` is not mounted
+- the actual development environment still comes from your project `flake.nix`
+
+So instead of trusting every coding-agent plugin, you isolate the whole editor environment it runs in.
 
 ## What it does
 
@@ -20,13 +44,41 @@ Files in this folder:
 - if no flake is available, launches plain VS Code / plain shell
 - supports multiple concurrent containers per workspace (auto instance names, optional `--instance`)
 
+In practice, that means:
+
+- no per-project container config is required
+- you can just run `ais` or `ai-sandbox` inside a flake-enabled repository
+- the sandbox reuses a shared `/nix` cache across projects
+- VS Code, extensions, and coding agents run inside the container instead of directly on your host
+
+## Why this differs from Dev Containers
+
+Dev Containers are mainly about reproducible development environments.
+
+This project is more specifically about running **VS Code itself** in a sandboxed container, which makes VS Code extensions and coding-agent plugins much safer to use.
+
+| Aspect | nix-ai-sandbox | Dev Containers |
+|-------|----------------|----------------|
+| Goal | isolate VS Code + agent plugins | reproducible dev environments |
+| Env definition | `flake.nix` via `nix develop` | `devcontainer.json` (+ Docker / Compose) |
+| Per-project config | none needed | usually required |
+| Editor runs | inside container | on host |
+| Plugin isolation | yes | usually no |
+| Cache reuse | shared `/nix` store | Docker layers |
+| Multi-service setup | no | yes |
+| Portability | mostly Linux/Nix | cross-platform |
+
+If your main concern is “I want to use coding-agent plugins without giving them direct access to my host editor session”, this is a better fit than normal devcontainers.
+
+If your main concern is standardized team environments across platforms and tools, devcontainers are the more standard choice.
+
 ## Commands
 
 Build/update the base image:
 
 ```bash
 ai-sandbox build-base
-```
+````
 
 Rebuild the base image from scratch (remove old image tag first, keep storage dirs):
 
@@ -52,7 +104,7 @@ Start VS Code for the current directory:
 ai-sandbox start .
 ```
 
-By default, `start` now streams startup logs (including flake/Nix setup) and auto-detaches once VS Code launch begins.
+By default, `start` streams startup logs (including flake/Nix setup) and auto-detaches once VS Code launch begins.
 
 Start and continue following logs even after VS Code launch:
 
@@ -73,7 +125,7 @@ Open an interactive shell in the sandbox:
 ai-sandbox shell .
 ```
 
-The shell prompt now includes a clear `AI-SANDBOX` marker, project name, directory, and Git branch/status (Starship-based, matching the host `tom_shell.nix` style).
+The shell prompt includes a clear `AI-SANDBOX` marker, project name, directory, and Git branch/status.
 
 Show logs from an existing sandbox container:
 
@@ -98,6 +150,31 @@ Override network mode (default is `host` for localhost OAuth callback compatibil
 ai-sandbox start . --network host
 ai-sandbox start . --network bridge
 ```
+
+## Typical usage
+
+In a flake-enabled repository:
+
+```bash
+cd your-project
+ai-sandbox warm .
+ai-sandbox start .
+```
+
+Or, if you want a shell instead of VS Code:
+
+```bash
+ai-sandbox shell .
+```
+
+If you have the short alias installed:
+
+```bash
+cd your-project
+ais
+```
+
+That is the intended workflow: enter a project, run `ais`, and get VS Code inside a container with the project dev environment coming from the flake.
 
 ## Recommended NixOS integration
 
@@ -161,7 +238,7 @@ git subtree push --prefix=ai-sandbox git@github.com:<org>/<ai-sandbox-repo>.git 
 
 ## Direnv usage in projects
 
-Do **not** auto-launch the container from `direnv`. That gets annoying fast.
+Do not auto-launch the container from `direnv`. That gets annoying fast.
 
 Use `direnv` to expose helper aliases instead.
 
@@ -194,18 +271,46 @@ sandbox-start
 
 ## Notes
 
-- This has only been tested with Nix Home Manager so far.
-- This has been tested with an X.org server; it will likely not work with Wayland yet.
-- Contributions are welcome.
-- The sandbox still has X11 access. That is the weakest part of this design.
-- The repo is mounted read/write on purpose.
-- Host `$HOME` is not mounted.
-- Host `/nix` is not mounted.
-- The shared bind-mounted storage makes repeated launches much faster after the first warmup.
-- Storage defaults to `~/.cache/ai-sandbox/{home,nix}` and is directly manageable as your user on the host.
-- `ai-sandbox start/shell/warm` now auto-register a host URL handler for `vscode://` and `vscode-insiders://` so OAuth callbacks (for example GitHub login) route back into the running sandbox container.
-- Network mode defaults to `host`, which makes `http://localhost:<port>/...` OAuth callbacks work generically across services because host browser localhost and container localhost are shared.
+* This has only been tested with Nix Home Manager so far.
+* This has been tested with an X.org server; it will likely not work with Wayland yet.
+* Contributions are welcome.
+* The sandbox still has X11 access. That is the weakest part of this design.
+* The repo is mounted read/write on purpose.
+* Host `$HOME` is not mounted.
+* Host `/nix` is not mounted.
+* The shared bind-mounted storage makes repeated launches much faster after the first warmup.
+* Storage defaults to `~/.cache/ai-sandbox/{home,nix}` and is directly manageable as your user on the host.
+* `ai-sandbox start`, `shell`, and `warm` auto-register a host URL handler for `vscode://` and `vscode-insiders://` so OAuth callbacks (for example GitHub login) route back into the running sandbox container.
 
-## License
+## Security model
 
-MIT. See `LICENSE`.
+This is not a hardened sandbox.
+
+It improves isolation in a very practical way, especially for VS Code extensions and coding agents, but it is not equivalent to a VM or a strict security boundary.
+
+The main tradeoff is convenience vs isolation:
+
+* real VS Code runs in the container
+* host home and host `/nix` stay out
+* but X11 access, writable workspace mounts, and optional host networking still exist
+
+So the right way to think about this is:
+
+> a practical containment layer for AI-assisted development
+
+not
+
+> a perfect sandbox
+
+## Summary
+
+If you install AI coding agents directly into VS Code on your host, you are effectively trusting arbitrary plugin code with a lot of access.
+
+This project gives you a much more practical setup:
+
+* open a flake-based repo
+* run `ais`
+* get real VS Code inside a container
+* keep your dev environment Nix-native
+* reuse cached dependencies across projects
+* reduce the blast radius of VS Code plugins and coding agents
