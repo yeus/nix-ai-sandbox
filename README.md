@@ -25,7 +25,7 @@ In many cases you do not fully know what they do, and some are not even open sou
 
 Even if a tool sandboxes parts of its execution, VS Code itself still usually runs on your host machine.
 
-`nix-ai-sandbox` takes a different approach:
+`ai-sandbox` takes a different approach:
 - VS Code runs inside a container
 - extensions run inside that container
 - your host `$HOME` is not mounted
@@ -57,7 +57,7 @@ Dev Containers are mainly about reproducible development environments.
 
 This project is more specifically about running **VS Code itself** in a sandboxed container, which makes VS Code extensions and coding-agent plugins much safer to use.
 
-| Aspect | nix-ai-sandbox | Dev Containers |
+| Aspect | ai-sandbox | Dev Containers |
 |-------|----------------|----------------|
 | Goal | isolate VS Code + agent plugins | reproducible dev environments |
 | Env definition | `flake.nix` via `nix develop` | `devcontainer.json` (+ Docker / Compose) |
