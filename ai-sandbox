@@ -416,6 +416,7 @@ fi
 
 common_args=(
   --name "$container_name"
+  --init
   --userns=keep-id
   --user "$(id -u):$(id -g)"
   --group-add keep-groups

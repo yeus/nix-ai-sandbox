@@ -163,14 +163,52 @@ if [[ "${AI_SANDBOX_SOURCE_USER_BASHRC:-0}" == "1" ]] && [ -f "$HOME/.bashrc" ];
   . "$HOME/.bashrc"
 fi
 
+if [[ -n "${AI_SANDBOX_SHELL_STARTED_FILE:-}" ]]; then
+  : > "$AI_SANDBOX_SHELL_STARTED_FILE"
+  unset AI_SANDBOX_SHELL_STARTED_FILE
+fi
+
 export HISTFILE="$HOME/.bash_eternal_history"
 shopt -s histappend
-PROMPT_COMMAND="history -a${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01'
+
+# Reset prompt-related state inherited from nix develop or shell hooks so
+# starship can initialize bash cleanly.
+unset STARSHIP_PROMPT_COMMAND STARSHIP_START_TIME STARSHIP_SHELL STARSHIP_SESSION_KEY
+unset BLE_ATTACHED BLE_VERSION BLE_PIPESTATUS
+unset bash_preexec_imported __bp_imported
+unset preexec_functions precmd_functions
+unset PS0
+trap - DEBUG 2>/dev/null || true
+
+PROMPT_COMMAND="history -a${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 
 if command -v starship >/dev/null 2>&1; then
   export STARSHIP_CONFIG="$HOME/.config/starship-ai-sandbox.toml"
-  eval "$(starship init bash)"
+  export STARSHIP_SHELL="bash"
+
+  __ai_sandbox_starship_precmd() {
+    local last_status=$?
+    local -a pipe_status
+    local job_count=0
+    local job
+
+    pipe_status=("${PIPESTATUS[@]}")
+    jobs &>/dev/null
+    for job in $(jobs -p); do
+      [[ -n "$job" ]] && ((job_count++))
+    done
+
+    PS1="$(starship prompt \
+      --terminal-width="${COLUMNS:-80}" \
+      --status="${last_status}" \
+      --pipestatus="${pipe_status[*]}" \
+      --jobs="${job_count}" \
+      --shlvl="${SHLVL:-1}")"
+  }
+
+  PS2="$(starship prompt --continuation)"
+  PROMPT_COMMAND="history -a; __ai_sandbox_starship_precmd"
 else
   __ai_sandbox_git_branch() {
     git rev-parse --abbrev-ref HEAD 2>/dev/null | awk '{printf " (%s)", $0}'
@@ -235,6 +273,8 @@ EOF
 }
 
 auto_repair_attempted=0
+last_nix_develop_missing_default_devshell=0
+last_nix_develop_store_corruption=0
 
 looks_like_nix_store_corruption() {
   local log_file="$1"
@@ -246,26 +286,36 @@ looks_like_nix_store_corruption() {
 run_nix_develop_with_auto_repair() {
   local log_file status
   log_file="$(mktemp)"
+  last_nix_develop_missing_default_devshell=0
+  last_nix_develop_store_corruption=0
 
-  if nix develop "$flake_target" --command "$@" >"$log_file" 2>&1; then
-    cat "$log_file"
+  if nix develop "$flake_target" --command "$@" > >(tee "$log_file") 2>&1; then
     rm -f "$log_file"
     return 0
+  else
+    status=$?
   fi
 
-  status=$?
-  cat "$log_file"
+  if grep -Fq "does not provide attribute 'devShells." "$log_file"; then
+    last_nix_develop_missing_default_devshell=1
+    rm -f "$log_file"
+    return "$status"
+  fi
 
   if [[ "$auto_nix_repair" == "1" ]] \
     && [[ "$auto_repair_attempted" -eq 0 ]] \
     && looks_like_nix_store_corruption "$log_file"; then
+    last_nix_develop_store_corruption=1
     auto_repair_attempted=1
     echo "AI_SANDBOX: detected likely /nix store corruption; running automatic repair and retrying..." >&2
     if nix-store --verify --check-contents --repair; then
       echo "AI_SANDBOX: repair finished; retrying nix develop..." >&2
-      rm -f "$log_file"
-      nix develop "$flake_target" --command "$@"
-      return $?
+      if nix develop "$flake_target" --command "$@" > >(tee "$log_file") 2>&1; then
+        rm -f "$log_file"
+        return 0
+      else
+        status=$?
+      fi
     fi
     echo "AI_SANDBOX: automatic nix-store repair failed." >&2
   fi
@@ -301,33 +351,68 @@ case "$mode" in
       if run_nix_develop_with_auto_repair true; then
         exit 0
       fi
-      echo "Flake found at $flake_target but no usable devShell; skipping warmup."
-      print_nix_store_recovery_hint
+      if [[ "$last_nix_develop_missing_default_devshell" == "1" ]]; then
+        echo "AI_SANDBOX: no default dev shell exported by $flake_target; skipping nix warmup."
+        echo "Hint: pass --flake to a different flake, or add devShells.x86_64-linux.default if you want nix develop here."
+      else
+        echo "Flake found at $flake_target but no usable devShell; skipping warmup."
+      fi
+      if [[ "$last_nix_develop_store_corruption" == "1" ]]; then
+        print_nix_store_recovery_hint
+      fi
       exit 0
     else
-      echo "No flake found; nothing to warm."
+      echo "AI_SANDBOX: no flake detected for $workspace; skipping nix warmup."
       exit 0
     fi
     ;;
   shell)
     if [[ -n "$flake_target" ]]; then
-      if run_nix_develop_with_auto_repair bash --rcfile "$HOME/.ai-sandbox-bashrc" -i; then
+      echo "AI_SANDBOX: preparing flake dev shell at $flake_target..."
+      shell_started_file="$(mktemp)"
+      rm -f "$shell_started_file"
+      echo "AI_SANDBOX: entering interactive shell..."
+      if AI_SANDBOX_SHELL_STARTED_FILE="$shell_started_file" \
+        run_nix_develop_with_auto_repair /bin/bash --noprofile --rcfile "$HOME/.ai-sandbox-bashrc" -i; then
+        rm -f "$shell_started_file"
         exit 0
+      else
+        shell_status=$?
       fi
-      echo "Flake found at $flake_target but nix develop failed; starting plain bash."
-      print_nix_store_recovery_hint
+      if [[ -e "$shell_started_file" ]]; then
+        rm -f "$shell_started_file"
+        exit "$shell_status"
+      fi
+      rm -f "$shell_started_file"
+      if [[ "$last_nix_develop_missing_default_devshell" == "1" ]]; then
+        echo "AI_SANDBOX: no default dev shell exported by $flake_target; starting plain bash."
+        echo "Hint: pass --flake to a different flake, or add devShells.x86_64-linux.default if you want nix develop here."
+      else
+        echo "AI_SANDBOX: interactive nix develop shell failed to launch."
+        echo "Flake found at $flake_target but nix develop failed; starting plain bash."
+      fi
+      if [[ "$last_nix_develop_store_corruption" == "1" ]]; then
+        print_nix_store_recovery_hint
+      fi
     fi
-    exec bash --rcfile "$HOME/.ai-sandbox-bashrc" -i
+    exec /bin/bash --noprofile --rcfile "$HOME/.ai-sandbox-bashrc" -i
     ;;
   start)
     if [[ -n "$flake_target" ]]; then
-      if run_nix_develop_with_auto_repair bash -lc "$launch_code_cmd" _ "$workspace"; then
+      if run_nix_develop_with_auto_repair /bin/bash -lc "$launch_code_cmd" _ "$workspace"; then
         exit 0
       fi
-      echo "Flake found at $flake_target but no usable devShell; launching VS Code without nix develop."
-      print_nix_store_recovery_hint
+      if [[ "$last_nix_develop_missing_default_devshell" == "1" ]]; then
+        echo "AI_SANDBOX: no default dev shell exported by $flake_target; launching VS Code without nix develop."
+        echo "Hint: pass --flake to a different flake, or add devShells.x86_64-linux.default if you want nix develop on startup."
+      else
+        echo "Flake found at $flake_target but no usable devShell; launching VS Code without nix develop."
+      fi
+      if [[ "$last_nix_develop_store_corruption" == "1" ]]; then
+        print_nix_store_recovery_hint
+      fi
     fi
-    exec bash -lc "$launch_code_cmd" _ "$workspace"
+    exec /bin/bash -lc "$launch_code_cmd" _ "$workspace"
     ;;
   *)
     echo "Unknown mode: $mode" >&2
