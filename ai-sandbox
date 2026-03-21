@@ -23,6 +23,7 @@ Usage:
   ai-sandbox warm [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME]
   ai-sandbox logs [WORKSPACE] [-f|--follow]
   ai-sandbox open-url URL
+  ai-sandbox repair-nix
   ai-sandbox build-base
   ai-sandbox rebuild
   ai-sandbox reset-storage
@@ -164,7 +165,7 @@ logs_follow=0
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    start|shell|warm|logs|build-base|rebuild|reset-storage|reset-volumes|open-url|help|-h|--help)
+    start|shell|warm|logs|build-base|rebuild|reset-storage|reset-volumes|repair-nix|open-url|help|-h|--help)
       cmd="$1"
       shift
       ;;
@@ -288,6 +289,34 @@ case "$cmd" in
 
     echo "Reset storage: $NIX_STORAGE, $HOME_STORAGE"
     exit 0
+    ;;
+  repair-nix)
+    home_mount_spec=""
+    nix_mount_spec=""
+    if [[ "$HOME_STORAGE" == /* ]]; then
+      mkdir -p "$HOME_STORAGE"
+      home_mount_spec="$HOME_STORAGE:/sandbox-home:Z"
+    else
+      home_mount_spec="$HOME_STORAGE:/sandbox-home:Z,U"
+    fi
+
+    if [[ "$NIX_STORAGE" == /* ]]; then
+      mkdir -p "$NIX_STORAGE"
+      nix_mount_spec="$NIX_STORAGE:/nix:Z"
+    else
+      nix_mount_spec="$NIX_STORAGE:/nix:Z,U"
+    fi
+
+    exec podman run --rm -it \
+      --userns=keep-id \
+      --user "$(id -u):$(id -g)" \
+      --group-add keep-groups \
+      -e HOME=/sandbox-home \
+      -e XDG_RUNTIME_DIR=/tmp/xdg-runtime \
+      -e AI_SANDBOX_MODE=repair \
+      -v "$home_mount_spec" \
+      -v "$nix_mount_spec" \
+      "$IMAGE"
     ;;
   open-url)
     [[ -n "$open_url_arg" ]] || { echo "open-url requires a URL" >&2; exit 1; }

@@ -14,6 +14,7 @@ theme="${AI_SANDBOX_THEME:-light}"
 vscode_user_data_dir="${AI_SANDBOX_VSCODE_USER_DATA_DIR:-$HOME/.vscode-data}"
 vscode_extensions_dir="${AI_SANDBOX_VSCODE_EXTENSIONS_DIR:-$HOME/.vscode-extensions}"
 vscode_shared_user_dir="${AI_SANDBOX_VSCODE_SHARED_USER_DIR:-$HOME/.vscode-shared-user}"
+auto_nix_repair="${AI_SANDBOX_AUTO_NIX_REPAIR:-1}"
 
 # Child shells launched via `bash -lc` must see these values.
 export vscode_user_data_dir
@@ -215,12 +216,62 @@ resolve_flake_target() {
   echo ""
 }
 
-flake_target="$(resolve_flake_target)"
-cd "$workspace"
+flake_target=""
+if [[ "$mode" == "start" || "$mode" == "shell" || "$mode" == "warm" ]]; then
+  flake_target="$(resolve_flake_target)"
+  cd "$workspace"
+fi
 
-has_usable_dev_shell() {
-  [[ -n "$flake_target" ]] || return 1
-  nix develop "$flake_target" --command true >/dev/null 2>&1
+print_nix_store_recovery_hint() {
+  cat >&2 <<'EOF'
+Hint: this usually means the shared ai-sandbox /nix cache is corrupted.
+You can recover by resetting only the Nix storage cache and keeping VS Code home/settings:
+  1) stop running ai-sandbox containers
+  2) remove ~/.cache/ai-sandbox/nix
+  3) start ai-sandbox again (it will repopulate /nix)
+If you prefer a full reset (including sandbox home), run:
+  ai-sandbox reset-storage
+EOF
+}
+
+auto_repair_attempted=0
+
+looks_like_nix_store_corruption() {
+  local log_file="$1"
+  grep -Eiq \
+    '(/nix/store/.*: No such file or directory|path .*/nix/store/.* (is missing|is corrupt)|cannot build .*/nix/store/.*\.drv)' \
+    "$log_file"
+}
+
+run_nix_develop_with_auto_repair() {
+  local log_file status
+  log_file="$(mktemp)"
+
+  if nix develop "$flake_target" --command "$@" >"$log_file" 2>&1; then
+    cat "$log_file"
+    rm -f "$log_file"
+    return 0
+  fi
+
+  status=$?
+  cat "$log_file"
+
+  if [[ "$auto_nix_repair" == "1" ]] \
+    && [[ "$auto_repair_attempted" -eq 0 ]] \
+    && looks_like_nix_store_corruption "$log_file"; then
+    auto_repair_attempted=1
+    echo "AI_SANDBOX: detected likely /nix store corruption; running automatic repair and retrying..." >&2
+    if nix-store --verify --check-contents --repair; then
+      echo "AI_SANDBOX: repair finished; retrying nix develop..." >&2
+      rm -f "$log_file"
+      nix develop "$flake_target" --command "$@"
+      return $?
+    fi
+    echo "AI_SANDBOX: automatic nix-store repair failed." >&2
+  fi
+
+  rm -f "$log_file"
+  return "$status"
 }
 
 echo "AI_SANDBOX_VSCODE_DIRS: user-data=$vscode_user_data_dir extensions=$vscode_extensions_dir shared-user=$vscode_shared_user_dir"
@@ -239,15 +290,19 @@ launch_code_cmd='
 '
 
 case "$mode" in
+  repair)
+    echo "AI_SANDBOX: repairing shared /nix store cache..."
+    nix-store --verify --check-contents --repair
+    echo "AI_SANDBOX: nix-store repair completed."
+    exit 0
+    ;;
   warm)
-    if has_usable_dev_shell; then
-      if nix develop "$flake_target" --command true; then
+    if [[ -n "$flake_target" ]]; then
+      if run_nix_develop_with_auto_repair true; then
         exit 0
       fi
-      echo "Flake found at $flake_target but warmup command failed."
-      exit 1
-    elif [[ -n "$flake_target" ]]; then
       echo "Flake found at $flake_target but no usable devShell; skipping warmup."
+      print_nix_store_recovery_hint
       exit 0
     else
       echo "No flake found; nothing to warm."
@@ -255,18 +310,22 @@ case "$mode" in
     fi
     ;;
   shell)
-    if has_usable_dev_shell; then
-      exec nix develop "$flake_target" --command bash --rcfile "$HOME/.ai-sandbox-bashrc" -i
-    elif [[ -n "$flake_target" ]]; then
-      echo "Flake found at $flake_target but no usable devShell; starting plain bash."
+    if [[ -n "$flake_target" ]]; then
+      if run_nix_develop_with_auto_repair bash --rcfile "$HOME/.ai-sandbox-bashrc" -i; then
+        exit 0
+      fi
+      echo "Flake found at $flake_target but nix develop failed; starting plain bash."
+      print_nix_store_recovery_hint
     fi
     exec bash --rcfile "$HOME/.ai-sandbox-bashrc" -i
     ;;
   start)
-    if has_usable_dev_shell; then
-      exec nix develop "$flake_target" --command bash -lc "$launch_code_cmd" _ "$workspace"
-    elif [[ -n "$flake_target" ]]; then
+    if [[ -n "$flake_target" ]]; then
+      if run_nix_develop_with_auto_repair bash -lc "$launch_code_cmd" _ "$workspace"; then
+        exit 0
+      fi
       echo "Flake found at $flake_target but no usable devShell; launching VS Code without nix develop."
+      print_nix_store_recovery_hint
     fi
     exec bash -lc "$launch_code_cmd" _ "$workspace"
     ;;

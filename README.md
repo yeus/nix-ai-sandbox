@@ -92,6 +92,12 @@ Reset sandbox storage (clear `~/.cache/ai-sandbox/nix` and `~/.cache/ai-sandbox/
 ai-sandbox reset-storage
 ```
 
+Repair shared ai-sandbox Nix cache in place (verify/repair store paths, no delete):
+
+```bash
+ai-sandbox repair-nix
+```
+
 Warm the current project flake into the shared `/nix` storage directory:
 
 ```bash
@@ -219,6 +225,14 @@ ai-sandbox reset-storage
 ```
 
 Then launch separate instances again (for example with different `--instance` names).
+
+If `nix develop` fails with missing `/nix/store/...` files, run:
+
+```bash
+ai-sandbox repair-nix
+```
+
+This verifies and repairs the shared ai-sandbox `/nix` cache without deleting it.
 
 If you recently changed ai-sandbox scripts, rebuild and restart containers so the new entrypoint is used:
 
