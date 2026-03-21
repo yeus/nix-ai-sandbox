@@ -331,6 +331,9 @@ launch_code_cmd='
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}"
 
   echo "AI_SANDBOX_READY_VSCODE: launching VS Code for $1"
+  echo "AI_SANDBOX_HINT: VS Code inherits the environment from nix develop when a flake devShell is available."
+  echo "AI_SANDBOX_HINT: Repo-local tools still need project bootstrap inside the sandbox (for example: yarn install, pnpm install, npm install, or your project init command)."
+  echo "AI_SANDBOX_HINT: If Codex or the integrated terminal cannot find tools like vue-tsc, first run the project's install/bootstrap step inside this sandboxed workspace."
 
   code \
     --verbose \

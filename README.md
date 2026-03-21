@@ -171,6 +171,10 @@ ai-sandbox warm .
 ai-sandbox start .
 ```
 
+Important: `ai-sandbox start` launches VS Code from `nix develop` when your project exports a default dev shell, so flake-provided tools and `shellHook` environment variables should be available inside VS Code and agent processes.
+
+That does not replace project bootstrap steps. Repo-local tools such as `vue-tsc` often come from `node_modules/.bin`, Corepack shims, generated SDKs, or other files that only exist after you run the project initialization command inside the sandbox itself. If a tool is present in your normal dev shell but missing for Codex, the usual fix is to open a terminal in the sandboxed VS Code window and run the repo's setup step there first, for example `yarn install`, `pnpm install`, `npm install`, or a project-specific bootstrap command.
+
 Or, if you want a shell instead of VS Code:
 
 ```bash
