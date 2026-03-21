@@ -11,12 +11,21 @@ mode="${AI_SANDBOX_MODE:-start}"
 workspace="${AI_SANDBOX_WORKSPACE:-/workspace}"
 flake_input="${AI_SANDBOX_FLAKE:-}"
 theme="${AI_SANDBOX_THEME:-light}"
+vscode_user_data_dir="${AI_SANDBOX_VSCODE_USER_DATA_DIR:-$HOME/.vscode-data}"
+vscode_extensions_dir="${AI_SANDBOX_VSCODE_EXTENSIONS_DIR:-$HOME/.vscode-extensions}"
+vscode_shared_user_dir="${AI_SANDBOX_VSCODE_SHARED_USER_DIR:-$HOME/.vscode-shared-user}"
+
+# Child shells launched via `bash -lc` must see these values.
+export vscode_user_data_dir
+export vscode_extensions_dir
+export vscode_shared_user_dir
 
 mkdir -p \
   "$HOME" \
-  "$HOME/.vscode-data" \
-  "$HOME/.vscode-extensions" \
-  "$HOME/.config/Code/User" \
+  "$vscode_user_data_dir" \
+  "$vscode_extensions_dir" \
+  "$vscode_shared_user_dir" \
+  "$vscode_user_data_dir/User" \
   "$XDG_RUNTIME_DIR"
 
 chmod 700 "$XDG_RUNTIME_DIR" || true
@@ -43,7 +52,8 @@ seed_nix_if_needed() {
 }
 
 ensure_default_vscode_settings() {
-  local settings="$HOME/.config/Code/User/settings.json"
+  local settings="$vscode_user_data_dir/User/settings.json"
+  mkdir -p "$(dirname "$settings")"
   if [[ -e "$settings" ]]; then
     return
   fi
@@ -59,6 +69,41 @@ ensure_default_vscode_settings() {
   "window.autoDetectColorScheme": false
 }
 EOF
+}
+
+link_shared_vscode_user_files() {
+  local user_dir shared_dir
+  user_dir="$vscode_user_data_dir/User"
+  shared_dir="$vscode_shared_user_dir"
+
+  mkdir -p "$user_dir" "$shared_dir"
+
+  # Share the most user-facing config files between instances so VS Code feels
+  # consistent, while keeping Chromium/webview internals isolated.
+  for name in settings.json keybindings.json tasks.json locale.json; do
+    local target shared_link
+    target="$user_dir/$name"
+    shared_link="$shared_dir/$name"
+
+    if [[ -f "$target" && ! -e "$shared_link" ]]; then
+      mv "$target" "$shared_link"
+    fi
+
+    if [[ -e "$target" && ! -L "$target" ]]; then
+      rm -rf "$target"
+    fi
+
+    ln -sfn "$shared_link" "$target"
+  done
+
+  local snippets_target snippets_shared
+  snippets_target="$user_dir/snippets"
+  snippets_shared="$shared_dir/snippets"
+  mkdir -p "$snippets_shared"
+  if [[ -e "$snippets_target" && ! -L "$snippets_target" ]]; then
+    rm -rf "$snippets_target"
+  fi
+  ln -sfn "$snippets_shared" "$snippets_target"
 }
 
 ensure_ai_shell_prompt_files() {
@@ -110,7 +155,12 @@ EOF
 
   cat > "$HOME/.ai-sandbox-bashrc" <<'EOF'
 [ -f /etc/bash.bashrc ] && . /etc/bash.bashrc
-[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+
+# Keep shell startup deterministic by default.
+# User bashrc hooks can be re-enabled explicitly when needed.
+if [[ "${AI_SANDBOX_SOURCE_USER_BASHRC:-0}" == "1" ]] && [ -f "$HOME/.bashrc" ]; then
+  . "$HOME/.bashrc"
+fi
 
 export HISTFILE="$HOME/.bash_eternal_history"
 shopt -s histappend
@@ -131,6 +181,7 @@ EOF
 }
 
 seed_nix_if_needed
+link_shared_vscode_user_files
 ensure_default_vscode_settings
 ensure_ai_shell_prompt_files
 
@@ -167,6 +218,13 @@ resolve_flake_target() {
 flake_target="$(resolve_flake_target)"
 cd "$workspace"
 
+has_usable_dev_shell() {
+  [[ -n "$flake_target" ]] || return 1
+  nix develop "$flake_target" --command true >/dev/null 2>&1
+}
+
+echo "AI_SANDBOX_VSCODE_DIRS: user-data=$vscode_user_data_dir extensions=$vscode_extensions_dir shared-user=$vscode_shared_user_dir"
+
 launch_code_cmd='
   export BROWSER=/usr/local/bin/ai-sandbox-xdg-open
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}"
@@ -175,17 +233,20 @@ launch_code_cmd='
 
   code \
     --verbose \
-    --user-data-dir "$HOME/.vscode-data" \
-    --extensions-dir "$HOME/.vscode-extensions" \
+    --user-data-dir "$vscode_user_data_dir" \
+    --extensions-dir "$vscode_extensions_dir" \
     "$1"
 '
 
 case "$mode" in
   warm)
-    if [[ -n "$flake_target" ]]; then
+    if has_usable_dev_shell; then
       if nix develop "$flake_target" --command true; then
         exit 0
       fi
+      echo "Flake found at $flake_target but warmup command failed."
+      exit 1
+    elif [[ -n "$flake_target" ]]; then
       echo "Flake found at $flake_target but no usable devShell; skipping warmup."
       exit 0
     else
@@ -194,26 +255,20 @@ case "$mode" in
     fi
     ;;
   shell)
-    if [[ -n "$flake_target" ]]; then
-      if nix develop "$flake_target" --command bash --rcfile "$HOME/.ai-sandbox-bashrc" -i; then
-        exit 0
-      fi
+    if has_usable_dev_shell; then
+      exec nix develop "$flake_target" --command bash --rcfile "$HOME/.ai-sandbox-bashrc" -i
+    elif [[ -n "$flake_target" ]]; then
       echo "Flake found at $flake_target but no usable devShell; starting plain bash."
-      exec bash --rcfile "$HOME/.ai-sandbox-bashrc" -i
-    else
-      exec bash --rcfile "$HOME/.ai-sandbox-bashrc" -i
     fi
+    exec bash --rcfile "$HOME/.ai-sandbox-bashrc" -i
     ;;
   start)
-    if [[ -n "$flake_target" ]]; then
-      if nix develop "$flake_target" --command bash -lc "$launch_code_cmd" _ "$workspace"; then
-        exit 0
-      fi
+    if has_usable_dev_shell; then
+      exec nix develop "$flake_target" --command bash -lc "$launch_code_cmd" _ "$workspace"
+    elif [[ -n "$flake_target" ]]; then
       echo "Flake found at $flake_target but no usable devShell; launching VS Code without nix develop."
-      exec bash -lc "$launch_code_cmd" _ "$workspace"
-    else
-      exec bash -lc "$launch_code_cmd" _ "$workspace"
     fi
+    exec bash -lc "$launch_code_cmd" _ "$workspace"
     ;;
   *)
     echo "Unknown mode: $mode" >&2

@@ -119,6 +119,10 @@ ai-sandbox start . --instance vscode-a
 ai-sandbox start . --instance vscode-b
 ```
 
+Each sandbox instance now uses a hybrid VS Code profile model (details below).
+
+If you do not pass `--instance`, ai-sandbox now uses a stable default instance name per workspace so VS Code profile state is preserved across relaunches. If that default instance is already running, ai-sandbox automatically falls back to a unique instance suffix.
+
 Open an interactive shell in the sandbox:
 
 ```bash
@@ -175,6 +179,58 @@ ais
 ```
 
 That is the intended workflow: enter a project, run `ais`, and get VS Code inside a container with the project dev environment coming from the flake.
+
+## VS Code Profile Model (Hybrid)
+
+When multiple independent VS Code processes run in different containers, sharing one full `--user-data-dir` can break Chromium webview/service-worker state.
+
+To keep concurrent containers stable while preserving desktop-like behavior, ai-sandbox uses:
+
+- per-instance `--user-data-dir` internals at `/sandbox-home/.vscode-data/instances/<workspace-hash>-<instance>`
+- shared user config at `/sandbox-home/.vscode-shared-user`:
+  - `settings.json`
+  - `keybindings.json`
+  - `tasks.json`
+  - `locale.json`
+  - `snippets/`
+- shared extensions at `/sandbox-home/.vscode-extensions/shared`
+
+Practical behavior:
+
+- settings/keybindings/snippets stay consistent across instances
+- extensions installed in one instance appear in all instances
+- webview/process/cache internals remain isolated per instance to avoid cross-container collisions
+
+Shell behavior note:
+
+- ai-sandbox shell startup does **not** source `$HOME/.bashrc` by default (to avoid host/sandbox prompt hook conflicts)
+- set `AI_SANDBOX_SOURCE_USER_BASHRC=1` if you explicitly want to opt back in
+
+## Troubleshooting
+
+If only the first sandbox VS Code window works and later ones show:
+
+`Error loading webview: Could not register service worker: InvalidStateError`
+
+then clear stale shared VS Code profile data from older ai-sandbox runs and restart:
+
+```bash
+ai-sandbox reset-storage
+```
+
+Then launch separate instances again (for example with different `--instance` names).
+
+If you recently changed ai-sandbox scripts, rebuild and restart containers so the new entrypoint is used:
+
+```bash
+ai-sandbox rebuild
+```
+
+If shell prompts look corrupted (for example visible `\[\]` markers), leave `AI_SANDBOX_SOURCE_USER_BASHRC` unset (default `0`) or explicitly disable it:
+
+```bash
+export AI_SANDBOX_SOURCE_USER_BASHRC=0
+```
 
 ## Recommended NixOS integration
 

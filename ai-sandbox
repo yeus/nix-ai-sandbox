@@ -136,6 +136,24 @@ sanitize_instance_name() {
   echo "$cleaned"
 }
 
+pick_auto_instance_name() {
+  local base_name="$1"
+  local preferred="default"
+  local preferred_container="${base_name}-${preferred}"
+
+  # Reuse a stable default instance name for persistent VS Code profile state.
+  # If that container name is already in use (e.g. another live session), fall
+  # back to a unique instance suffix.
+  if podman inspect "$preferred_container" >/dev/null 2>&1; then
+    local rand_suffix
+    rand_suffix="$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+    echo "${preferred}-$(date +%Y%m%d-%H%M%S)-${rand_suffix}"
+    return
+  fi
+
+  echo "$preferred"
+}
+
 cmd="start"
 workspace="$PWD"
 flake_arg=""
@@ -339,14 +357,20 @@ base_container_name="ai-sandbox-$workspace_hash"
 if [[ -n "$instance_arg" ]]; then
   container_name="$base_container_name-$instance_arg"
 else
-  # Avoid SIGPIPE/pipefail exits from `tr ... | head` under `set -euo pipefail`.
-  rand_suffix="$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
-  auto_instance="$(date +%Y%m%d-%H%M%S)-${rand_suffix}"
+  auto_instance="$(pick_auto_instance_name "$base_container_name")"
   container_name="$base_container_name-$auto_instance"
   instance_arg="$auto_instance"
 fi
 
 echo "$container_name" > "$STATE_DIR/last-container"
+
+# Keep process/cache/webview data per instance to avoid Chromium profile
+# collisions, while sharing user-level settings/extensions for a desktop-like
+# experience across sandbox instances.
+vscode_profile_id="${workspace_hash}-${instance_arg}"
+vscode_user_data_dir="/sandbox-home/.vscode-data/instances/$vscode_profile_id"
+vscode_extensions_dir="/sandbox-home/.vscode-extensions/shared"
+vscode_shared_user_dir="/sandbox-home/.vscode-shared-user"
 
 xauth_file="${XAUTHORITY:-$HOME/.Xauthority}"
 [[ -f "$xauth_file" ]] || { echo "Xauthority file not found: $xauth_file" >&2; exit 1; }
@@ -380,6 +404,9 @@ common_args=(
   -e "AI_SANDBOX_PROJECT_NAME=$project_name"
   -e "AI_SANDBOX_INSTANCE_NAME=$instance_arg"
   -e "AI_SANDBOX_THEME=$theme"
+  -e "AI_SANDBOX_VSCODE_USER_DATA_DIR=$vscode_user_data_dir"
+  -e "AI_SANDBOX_VSCODE_EXTENSIONS_DIR=$vscode_extensions_dir"
+  -e "AI_SANDBOX_VSCODE_SHARED_USER_DIR=$vscode_shared_user_dir"
   -v /tmp/.X11-unix:/tmp/.X11-unix:ro
   -v "$xauth_file:/tmp/.Xauthority:ro"
   -v "$mount_root:/workspace:Z"
