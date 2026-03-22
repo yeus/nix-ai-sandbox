@@ -42,6 +42,10 @@ let
     exec ${aiSandboxScript}/bin/ai-sandbox "$@"
   '';
 
+  aiSandboxLaunchEditorScript = pkgs.writeShellScriptBin "ai-sandbox-launch-editor" ''
+    exec ${aiSandboxScript}/bin/ai-sandbox open-in-editor "$@"
+  '';
+
   aiSandboxUrlHandler = pkgs.writeShellScriptBin "ai-sandbox-url-handler" ''
     export AI_SANDBOX_STATE_DIR=${lib.escapeShellArg cfg.stateDir}
     export PATH=${lib.makeBinPath [
@@ -129,6 +133,7 @@ in
     home.packages = [
       aiSandboxScript
       aisScript
+      aiSandboxLaunchEditorScript
       aiSandboxUrlHandler
       pkgs.podman
       pkgs.xorg.xhost

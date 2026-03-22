@@ -144,6 +144,12 @@ ai-sandbox logs .        # one-shot
 ai-sandbox logs . -f     # follow
 ```
 
+Open a file in the running sandbox VS Code from the host:
+
+```bash
+ai-sandbox open-in-editor /abs/path/to/file.ts 1062 55
+```
+
 Override the flake location:
 
 ```bash
@@ -242,6 +248,43 @@ If you recently changed ai-sandbox scripts, rebuild and restart containers so th
 
 ```bash
 ai-sandbox rebuild
+```
+
+If dev-server "open in editor" links (error overlays, stack traces, click-to-open file links) open host VS Code instead of the sandbox window:
+
+```bash
+ai-sandbox start .
+LAUNCH_EDITOR=ai-sandbox-launch-editor <your-dev-command>
+```
+
+This pattern is framework-agnostic and works for many stacks that honor `LAUNCH_EDITOR` through `launch-editor` style tooling (for example Vite apps like React/Vue/Svelte, Quasar CLI with Vite, and other dev servers that support `LAUNCH_EDITOR`).
+
+Examples:
+
+```bash
+LAUNCH_EDITOR=ai-sandbox-launch-editor npm run dev
+LAUNCH_EDITOR=ai-sandbox-launch-editor pnpm dev
+LAUNCH_EDITOR=ai-sandbox-launch-editor yarn dev
+LAUNCH_EDITOR=ai-sandbox-launch-editor quasar dev
+```
+
+This works because `ai-sandbox-launch-editor` forwards launch-editor calls to:
+
+```bash
+ai-sandbox open-in-editor <file> <line> <column>
+```
+
+If you do not use the Nix module helper package, create a tiny wrapper script and point `LAUNCH_EDITOR` to it:
+
+```bash
+#!/usr/bin/env bash
+exec ai-sandbox open-in-editor "$@"
+```
+
+Then:
+
+```bash
+LAUNCH_EDITOR=/absolute/path/to/your-wrapper.sh <your-dev-command>
 ```
 
 If shell prompts look corrupted (for example visible `\[\]` markers), leave `AI_SANDBOX_SOURCE_USER_BASHRC` unset (default `0`) or explicitly disable it:

@@ -23,6 +23,7 @@ Usage:
   ai-sandbox warm [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME]
   ai-sandbox logs [WORKSPACE] [-f|--follow]
   ai-sandbox open-url URL
+  ai-sandbox open-in-editor FILE [LINE] [COLUMN]
   ai-sandbox repair-nix
   ai-sandbox build-base
   ai-sandbox rebuild
@@ -122,6 +123,36 @@ pick_running_container_for_workspace() {
     --format '{{.Names}}' | head -n1
 }
 
+pick_running_container_for_file() {
+  local file_path="$1"
+  local best_name=""
+  local best_len=0
+  local name ws ws_len
+
+  while IFS=$'\t' read -r name ws; do
+    [[ -n "$name" && -n "$ws" ]] || continue
+
+    if [[ "$file_path" == "$ws" || "$file_path" == "$ws/"* ]]; then
+      ws_len="${#ws}"
+      if (( ws_len > best_len )); then
+        best_len="$ws_len"
+        best_name="$name"
+      fi
+    fi
+  done < <(
+    podman ps \
+      --filter label=ai-sandbox=true \
+      --format '{{.Names}}	{{.Label "ai-sandbox.workspace"}}'
+  )
+
+  if [[ -n "$best_name" ]]; then
+    echo "$best_name"
+    return 0
+  fi
+
+  return 1
+}
+
 sanitize_instance_name() {
   local raw="$1"
   local cleaned
@@ -159,13 +190,16 @@ cmd="start"
 workspace="$PWD"
 flake_arg=""
 open_url_arg=""
+open_editor_file=""
+open_editor_line=""
+open_editor_col=""
 instance_arg=""
 follow_logs_on_start=0
 logs_follow=0
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    start|shell|warm|logs|build-base|rebuild|reset-storage|reset-volumes|repair-nix|open-url|help|-h|--help)
+    start|shell|warm|logs|build-base|rebuild|reset-storage|reset-volumes|repair-nix|open-url|open-in-editor|help|-h|--help)
       cmd="$1"
       shift
       ;;
@@ -206,6 +240,21 @@ while [[ $# -gt 0 ]]; do
     *)
       if [[ "$cmd" == "open-url" && -z "$open_url_arg" ]]; then
         open_url_arg="$1"
+      elif [[ "$cmd" == "open-in-editor" ]]; then
+        if [[ -z "$open_editor_file" ]]; then
+          if [[ "$1" == /* ]]; then
+            open_editor_file="$1"
+          else
+            open_editor_file="$(realpath -m "$1")"
+          fi
+        elif [[ -z "$open_editor_line" ]]; then
+          open_editor_line="$1"
+        elif [[ -z "$open_editor_col" ]]; then
+          open_editor_col="$1"
+        else
+          echo "open-in-editor accepts at most FILE [LINE] [COLUMN]" >&2
+          exit 1
+        fi
       else
         workspace="$(realpath "$1")"
       fi
@@ -328,6 +377,37 @@ case "$cmd" in
     echo "No running AI sandbox container found, and host VS Code failed to handle --open-url." >&2
     exit 1
     ;;
+  open-in-editor)
+    [[ -n "$open_editor_file" ]] || { echo "open-in-editor requires FILE [LINE] [COLUMN]" >&2; exit 1; }
+    if ! [[ -z "$open_editor_line" || "$open_editor_line" =~ ^[0-9]+$ ]]; then
+      echo "LINE must be numeric: $open_editor_line" >&2
+      exit 1
+    fi
+    if ! [[ -z "$open_editor_col" || "$open_editor_col" =~ ^[0-9]+$ ]]; then
+      echo "COLUMN must be numeric: $open_editor_col" >&2
+      exit 1
+    fi
+
+    target="$open_editor_file"
+    if [[ -n "$open_editor_line" && -n "$open_editor_col" ]]; then
+      target="${target}:${open_editor_line}:${open_editor_col}"
+    elif [[ -n "$open_editor_line" ]]; then
+      target="${target}:${open_editor_line}"
+    fi
+
+    container="$(pick_running_container_for_file "$open_editor_file" || true)"
+    [[ -n "$container" ]] || container="$(pick_running_container)"
+    if [[ -n "$container" ]]; then
+      exec podman exec "$container" bash -lc '
+        exec /usr/local/bin/code \
+          --user-data-dir "${AI_SANDBOX_VSCODE_USER_DATA_DIR:-/sandbox-home/.vscode-data}" \
+          --extensions-dir "${AI_SANDBOX_VSCODE_EXTENSIONS_DIR:-/sandbox-home/.vscode-extensions}" \
+          --goto "$1"
+      ' _ "$target"
+    fi
+
+    exec code --goto "$target"
+    ;;
 esac
 
 [[ -d "$workspace" ]] || { echo "Workspace does not exist: $workspace" >&2; exit 1; }
@@ -431,6 +511,8 @@ common_args=(
   -e "AI_SANDBOX_MODE=$cmd"
   -e "AI_SANDBOX_FLAKE=$flake_arg_container"
   -e "AI_SANDBOX_WORKSPACE=$container_workspace"
+  -e "AI_SANDBOX_HOST_MOUNT_ROOT=$mount_root"
+  -e "AI_SANDBOX_CONTAINER_MOUNT_ROOT=/workspace"
   -e "AI_SANDBOX_PROJECT_NAME=$project_name"
   -e "AI_SANDBOX_INSTANCE_NAME=$instance_arg"
   -e "AI_SANDBOX_THEME=$theme"
