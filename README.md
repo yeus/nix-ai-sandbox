@@ -254,7 +254,7 @@ If dev-server "open in editor" links (error overlays, stack traces, click-to-ope
 
 ```bash
 ai-sandbox start .
-LAUNCH_EDITOR=ai-sandbox-launch-editor <your-dev-command>
+LAUNCH_EDITOR=ais <your-dev-command>
 ```
 
 This pattern is framework-agnostic and works for many stacks that honor `LAUNCH_EDITOR` through `launch-editor` style tooling (for example Vite apps like React/Vue/Svelte, Quasar CLI with Vite, and other dev servers that support `LAUNCH_EDITOR`).
@@ -262,17 +262,19 @@ This pattern is framework-agnostic and works for many stacks that honor `LAUNCH_
 Examples:
 
 ```bash
-LAUNCH_EDITOR=ai-sandbox-launch-editor npm run dev
-LAUNCH_EDITOR=ai-sandbox-launch-editor pnpm dev
-LAUNCH_EDITOR=ai-sandbox-launch-editor yarn dev
-LAUNCH_EDITOR=ai-sandbox-launch-editor quasar dev
+LAUNCH_EDITOR=ais npm run dev
+LAUNCH_EDITOR=ais pnpm dev
+LAUNCH_EDITOR=ais yarn dev
+LAUNCH_EDITOR=ais quasar dev
 ```
 
-This works because `ai-sandbox-launch-editor` forwards launch-editor calls to:
+This works because `ais` detects launch-editor style arguments (`<file> [line] [column]`) and forwards them to:
 
 ```bash
 ai-sandbox open-in-editor <file> <line> <column>
 ```
+
+If you prefer, `ai-sandbox-launch-editor` remains available and does the same forwarding.
 
 If you do not use the Nix module helper package, create a tiny wrapper script and point `LAUNCH_EDITOR` to it:
 

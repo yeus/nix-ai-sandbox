@@ -153,6 +153,51 @@ pick_running_container_for_file() {
   return 1
 }
 
+map_host_target_for_container() {
+  local container="$1"
+  local target="$2"
+  local path_part="$target"
+  local line_part=""
+  local col_part=""
+  local host_root=""
+  local container_root=""
+  local mapped_path=""
+  local env_dump
+
+  if [[ "$target" =~ ^(.+):([0-9]+):([0-9]+)$ ]]; then
+    path_part="${BASH_REMATCH[1]}"
+    line_part="${BASH_REMATCH[2]}"
+    col_part="${BASH_REMATCH[3]}"
+  elif [[ "$target" =~ ^(.+):([0-9]+)$ ]]; then
+    path_part="${BASH_REMATCH[1]}"
+    line_part="${BASH_REMATCH[2]}"
+  fi
+
+  env_dump="$(podman inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null || true)"
+  host_root="$(printf '%s\n' "$env_dump" | sed -n 's/^AI_SANDBOX_HOST_MOUNT_ROOT=//p' | head -n1)"
+  container_root="$(printf '%s\n' "$env_dump" | sed -n 's/^AI_SANDBOX_CONTAINER_MOUNT_ROOT=//p' | head -n1)"
+  [[ -n "$container_root" ]] || container_root="/workspace"
+
+  mapped_path="$path_part"
+  if [[ -n "$host_root" ]]; then
+    if [[ "$path_part" == "$host_root" ]]; then
+      mapped_path="$container_root"
+    elif [[ "$path_part" == "$host_root/"* ]]; then
+      mapped_path="$container_root/${path_part#"$host_root"/}"
+    fi
+  fi
+
+  if [[ -n "$line_part" && -n "$col_part" ]]; then
+    printf '%s:%s:%s\n' "$mapped_path" "$line_part" "$col_part"
+    return 0
+  fi
+  if [[ -n "$line_part" ]]; then
+    printf '%s:%s\n' "$mapped_path" "$line_part"
+    return 0
+  fi
+  printf '%s\n' "$mapped_path"
+}
+
 sanitize_instance_name() {
   local raw="$1"
   local cleaned
@@ -398,8 +443,18 @@ case "$cmd" in
     container="$(pick_running_container_for_file "$open_editor_file" || true)"
     [[ -n "$container" ]] || container="$(pick_running_container)"
     if [[ -n "$container" ]]; then
+      target="$(map_host_target_for_container "$container" "$target")"
       exec podman exec "$container" bash -lc '
-        exec /usr/local/bin/code \
+        editor_bin="$(command -v code || true)"
+        if [[ -z "$editor_bin" && -x /usr/bin/code ]]; then
+          editor_bin="/usr/bin/code"
+        fi
+        if [[ -z "$editor_bin" ]]; then
+          echo "No VS Code binary found inside sandbox container." >&2
+          exit 127
+        fi
+
+        exec "$editor_bin" \
           --user-data-dir "${AI_SANDBOX_VSCODE_USER_DATA_DIR:-/sandbox-home/.vscode-data}" \
           --extensions-dir "${AI_SANDBOX_VSCODE_EXTENSIONS_DIR:-/sandbox-home/.vscode-extensions}" \
           --goto "$1"

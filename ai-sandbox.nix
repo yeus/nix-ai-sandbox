@@ -39,6 +39,17 @@ let
   '';
 
   aisScript = pkgs.writeShellScriptBin "ais" ''
+    # launch-editor style invocation: <file> [line] [column]
+    if [[ "$#" -ge 1 && "$#" -le 3 && "$1" != -* ]]; then
+      if [[ -z "''${2:-}" || "''${2:-}" =~ ^[0-9]+$ ]]; then
+        if [[ -z "''${3:-}" || "''${3:-}" =~ ^[0-9]+$ ]]; then
+          if [[ -f "$1" || "$1" == /* || "$1" == ./* || "$1" == ../* ]]; then
+            exec ${aiSandboxScript}/bin/ai-sandbox open-in-editor "$@"
+          fi
+        fi
+      fi
+    fi
+
     exec ${aiSandboxScript}/bin/ai-sandbox "$@"
   '';
 
