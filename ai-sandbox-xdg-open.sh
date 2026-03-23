@@ -92,7 +92,9 @@ open_in_sandbox_code_if_file_target() {
     --goto "$goto_target"
 }
 
-open_in_sandbox_code_if_file_target "$url"
+if open_in_sandbox_code_if_file_target "$url"; then
+  exit 0
+fi
 
 # Prefer desktop portal to open non-file targets in the host browser.
 # Parent window is empty string because we are in a containerized X11 app.

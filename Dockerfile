@@ -91,10 +91,15 @@ COPY container-entrypoint.sh /usr/local/bin/container-entrypoint.sh
 COPY ai-sandbox-open-url.sh /usr/local/bin/ai-sandbox-open-url
 COPY ai-sandbox-xdg-open.sh /usr/local/bin/ai-sandbox-xdg-open
 
+# Some VS Code auth flows invoke `xdg-open` directly instead of respecting the
+# BROWSER env var, so replace both the PATH-shadowed and system xdg-open entry
+# points to preserve host-browser opens.
 RUN chmod +x \
     /usr/local/bin/container-entrypoint.sh \
     /usr/local/bin/ai-sandbox-open-url \
-    /usr/local/bin/ai-sandbox-xdg-open
+    /usr/local/bin/ai-sandbox-xdg-open \
+ && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/local/bin/xdg-open \
+ && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/bin/xdg-open
 
 ENV PATH=/usr/local/bin:/usr/bin:/bin
 
