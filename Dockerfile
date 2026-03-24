@@ -46,6 +46,14 @@ RUN apt-get update && apt-get install -y \
 RUN curl -fsSL https://starship.rs/install.sh | sh -s -- --yes
 RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
+# --- install Node.js (LTS, proper version, not Ubuntu garbage) ---
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install -g npm@latest
+
+# --- install Codex CLI globally ---
+RUN npm install -g @openai/codex
+
 RUN wget -O /tmp/code.deb "https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64" \
  && apt-get update \
  && apt-get install -y /tmp/code.deb \

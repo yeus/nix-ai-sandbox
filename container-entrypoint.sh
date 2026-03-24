@@ -32,15 +32,33 @@ mkdir -p \
 chmod 700 "$XDG_RUNTIME_DIR" || true
 
 seed_nix_if_needed() {
+  local nix_seeded=0
+
+  # Login profile scripts are not guaranteed in non-login shells.
+  # Seed PATH with common Nix profile locations up front.
+  for candidate in \
+    "/nix/var/nix/profiles/default/bin" \
+    "/nix/var/nix/profiles/per-user/${USER}/profile/bin" \
+    "$HOME/.nix-profile/bin" \
+    "/home/dev/.nix-profile/bin" \
+    "/root/.nix-profile/bin"
+  do
+    if [[ -d "$candidate" && ":$PATH:" != *":$candidate:"* ]]; then
+      PATH="$candidate:$PATH"
+    fi
+  done
+  export PATH
+
   if command -v nix >/dev/null 2>&1; then
     return
   fi
 
   mkdir -p /nix
 
-  if [[ ! -e /nix/store ]]; then
-    rsync -a /nix-seed/ /nix/
-  fi
+  # A pre-existing mounted /nix may miss the exact store path that this image's
+  # nix shim points to. Merge seed content even when /nix/store already exists.
+  rsync -a /nix-seed/ /nix/
+  nix_seeded=1
 
   mkdir -p \
     /nix/var/nix/db \
@@ -48,6 +66,21 @@ seed_nix_if_needed() {
     /nix/var/nix/profiles \
     /nix/var/nix/temproots \
     /nix/var/nix/userpool
+
+  if [[ "$nix_seeded" -eq 1 ]]; then
+    for candidate in \
+      "/nix/var/nix/profiles/default/bin" \
+      "/nix/var/nix/profiles/per-user/${USER}/profile/bin" \
+      "$HOME/.nix-profile/bin" \
+      "/home/dev/.nix-profile/bin" \
+      "/root/.nix-profile/bin"
+    do
+      if [[ -d "$candidate" && ":$PATH:" != *":$candidate:"* ]]; then
+        PATH="$candidate:$PATH"
+      fi
+    done
+    export PATH
+  fi
 
   hash -r
 }
@@ -284,16 +317,24 @@ looks_like_nix_store_corruption() {
 }
 
 run_nix_develop_with_auto_repair() {
-  local log_file status
+  local stream_mode log_file status
+  stream_mode="${1:-capture_all}"
+  shift
   log_file="$(mktemp)"
   last_nix_develop_missing_default_devshell=0
   last_nix_develop_store_corruption=0
 
-  if nix develop "$flake_target" --command "$@" > >(tee "$log_file") 2>&1; then
+  if [[ "$stream_mode" == "preserve_stdout_tty" ]]; then
+    nix develop "$flake_target" --command "$@" 2> >(tee "$log_file" >&2)
+    status=$?
+  else
+    nix develop "$flake_target" --command "$@" > >(tee "$log_file") 2>&1
+    status=$?
+  fi
+
+  if [[ "$status" -eq 0 ]]; then
     rm -f "$log_file"
     return 0
-  else
-    status=$?
   fi
 
   if grep -Fq "does not provide attribute 'devShells." "$log_file"; then
@@ -310,11 +351,17 @@ run_nix_develop_with_auto_repair() {
     echo "AI_SANDBOX: detected likely /nix store corruption; running automatic repair and retrying..." >&2
     if nix-store --verify --check-contents --repair; then
       echo "AI_SANDBOX: repair finished; retrying nix develop..." >&2
-      if nix develop "$flake_target" --command "$@" > >(tee "$log_file") 2>&1; then
+      if [[ "$stream_mode" == "preserve_stdout_tty" ]]; then
+        nix develop "$flake_target" --command "$@" 2> >(tee "$log_file" >&2)
+        status=$?
+      else
+        nix develop "$flake_target" --command "$@" > >(tee "$log_file") 2>&1
+        status=$?
+      fi
+
+      if [[ "$status" -eq 0 ]]; then
         rm -f "$log_file"
         return 0
-      else
-        status=$?
       fi
     fi
     echo "AI_SANDBOX: automatic nix-store repair failed." >&2
@@ -351,7 +398,7 @@ case "$mode" in
     ;;
   warm)
     if [[ -n "$flake_target" ]]; then
-      if run_nix_develop_with_auto_repair true; then
+      if run_nix_develop_with_auto_repair capture_all true; then
         exit 0
       fi
       if [[ "$last_nix_develop_missing_default_devshell" == "1" ]]; then
@@ -376,7 +423,7 @@ case "$mode" in
       rm -f "$shell_started_file"
       echo "AI_SANDBOX: entering interactive shell..."
       if AI_SANDBOX_SHELL_STARTED_FILE="$shell_started_file" \
-        run_nix_develop_with_auto_repair /bin/bash --noprofile --rcfile "$HOME/.ai-sandbox-bashrc" -i; then
+        run_nix_develop_with_auto_repair preserve_stdout_tty /bin/bash --noprofile --rcfile "$HOME/.ai-sandbox-bashrc" -i; then
         rm -f "$shell_started_file"
         exit 0
       else
@@ -402,7 +449,7 @@ case "$mode" in
     ;;
   start)
     if [[ -n "$flake_target" ]]; then
-      if run_nix_develop_with_auto_repair /bin/bash -lc "$launch_code_cmd" _ "$workspace"; then
+      if run_nix_develop_with_auto_repair capture_all /bin/bash -lc "$launch_code_cmd" _ "$workspace"; then
         exit 0
       fi
       if [[ "$last_nix_develop_missing_default_devshell" == "1" ]]; then
