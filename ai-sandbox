@@ -213,6 +213,23 @@ sanitize_instance_name() {
   echo "$cleaned"
 }
 
+sanitize_container_name_part() {
+  local raw="$1"
+  local fallback="$2"
+  local cleaned
+  cleaned="$(echo -n "$raw" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_.-' '-')"
+  cleaned="${cleaned#-}"
+  cleaned="${cleaned%-}"
+  cleaned="${cleaned:0:32}"
+
+  if [[ -z "$cleaned" ]]; then
+    echo "$fallback"
+    return
+  fi
+
+  echo "$cleaned"
+}
+
 pick_auto_instance_name() {
   local base_name="$1"
   local preferred="default"
@@ -517,7 +534,12 @@ if [[ -n "${flake_arg:-}" ]]; then
 fi
 
 workspace_hash="$(echo -n "$workspace" | sha256sum | cut -c1-12)"
-base_container_name="ai-sandbox-$workspace_hash"
+project_slug="$(sanitize_container_name_part "$project_name" "workspace")"
+launch_context="vscode"
+if [[ "$cmd" == "shell" || "$cmd" == "warm" ]]; then
+  launch_context="shell"
+fi
+base_container_name="ai-sandbox-${project_slug}-${launch_context}-${workspace_hash}"
 if [[ -n "$instance_arg" ]]; then
   container_name="$base_container_name-$instance_arg"
 else
