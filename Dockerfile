@@ -51,15 +51,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     npm install -g npm@latest
 
-# --- install Codex CLI globally ---
-RUN npm install -g @openai/codex
-
-RUN wget -O /tmp/code.deb "https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64" \
- && apt-get update \
- && apt-get install -y /tmp/code.deb \
- && rm -f /tmp/code.deb \
- && rm -rf /var/lib/apt/lists/*
-
 RUN useradd -m -s /bin/bash dev
 
 RUN mkdir -p /sandbox-home /workspace /nix \
@@ -98,6 +89,10 @@ RUN mkdir -p /nix-seed \
 COPY container-entrypoint.sh /usr/local/bin/container-entrypoint.sh
 COPY ai-sandbox-open-url.sh /usr/local/bin/ai-sandbox-open-url
 COPY ai-sandbox-xdg-open.sh /usr/local/bin/ai-sandbox-xdg-open
+COPY ai-sandbox-vscode-update.sh /usr/local/bin/ai-sandbox-vscode-update
+COPY ai-sandbox-user-code.sh /usr/local/bin/ai-sandbox-user-code
+COPY ai-sandbox-default-install.sh /usr/local/bin/ai-sandbox-default-install
+COPY AGENTS.md /usr/local/share/ai-sandbox/default-AGENTS.md
 
 # Some VS Code auth flows invoke `xdg-open` directly instead of respecting the
 # BROWSER env var, so replace both the PATH-shadowed and system xdg-open entry
@@ -106,8 +101,12 @@ RUN chmod +x \
     /usr/local/bin/container-entrypoint.sh \
     /usr/local/bin/ai-sandbox-open-url \
     /usr/local/bin/ai-sandbox-xdg-open \
+    /usr/local/bin/ai-sandbox-vscode-update \
+    /usr/local/bin/ai-sandbox-user-code \
+    /usr/local/bin/ai-sandbox-default-install \
  && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/local/bin/xdg-open \
- && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/bin/xdg-open
+ && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/bin/xdg-open \
+ && ln -sf /usr/local/bin/ai-sandbox-user-code /usr/local/bin/code
 
 ENV PATH=/usr/local/bin:/usr/bin:/bin
 

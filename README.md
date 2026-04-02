@@ -74,11 +74,26 @@ If your main concern is standardized team environments across platforms and tool
 
 ## Commands
 
-Build/update the base image:
+Build/update the base image only:
 
 ```bash
 ai-sandbox build-base
 ````
+
+Build the image and then install default user-space software (Codex + VS Code):
+
+```bash
+ai-sandbox build .
+```
+
+Install or refresh default user-space software without rebuilding:
+
+```bash
+ai-sandbox install .
+ai-sandbox install . --force
+ai-sandbox install . --only codex
+ai-sandbox install . --only vscode
+```
 
 Rebuild the base image from scratch (remove old image tag first, keep storage dirs):
 
@@ -133,6 +148,21 @@ Open an interactive shell in the sandbox:
 
 ```bash
 ai-sandbox shell .
+```
+
+Run any command in the sandbox (auto-reuses a running workspace sandbox when available):
+
+```bash
+ai-sandbox exec . -- codex --version
+ai-sandbox exec . -- ai-sandbox-default-install --only codex --force
+```
+
+With the short alias, unknown commands are routed to sandbox exec automatically:
+
+```bash
+ais codex --version
+ais ai-sandbox-default-install --only codex --force
+ais code --version
 ```
 
 The shell prompt includes a clear `AI-SANDBOX` marker, project name, directory, and Git branch/status.
@@ -217,6 +247,51 @@ Practical behavior:
 - extensions installed in one instance appear in all instances
 - webview/process/cache internals remain isolated per instance to avoid cross-container collisions
 
+## Persistent Home, Codex Instructions, and Updates
+
+Sandbox home is persisted in `~/.cache/ai-sandbox/home` by default (configurable), and is mounted at `/sandbox-home` inside containers.
+
+- `ai-sandbox build`, `ai-sandbox build-base`, and `ai-sandbox rebuild` do not erase sandbox home.
+- `ai-sandbox reset-storage` is the command that erases persisted home and nix storage.
+
+Codex global instructions are seeded once (if missing) to:
+
+```bash
+~/.codex/AGENTS.md
+```
+
+from:
+
+```bash
+ai-sandbox/AGENTS.md
+```
+
+To fully disable default seeding and erase global Codex instructions:
+
+```bash
+ais bash -lc 'mkdir -p ~/.codex && touch ~/.codex/.disable_default_agents_seed && rm -f ~/.codex/AGENTS.md ~/.codex/AGENTS.override.md'
+```
+
+To re-enable default seeding later:
+
+```bash
+ais bash -lc 'rm -f ~/.codex/.disable_default_agents_seed'
+```
+
+Codex is installed in user space (`~/.npm-global`) and persisted in sandbox home:
+
+```bash
+ai-sandbox install . --only codex
+ais codex --version
+```
+
+VS Code runs from a user-space install in sandbox home:
+
+```bash
+ai-sandbox install . --only vscode --force
+ais code --version
+```
+
 Shell behavior note:
 
 - ai-sandbox shell startup does **not** source `$HOME/.bashrc` by default (to avoid host/sandbox prompt hook conflicts)
@@ -248,6 +323,14 @@ If you recently changed ai-sandbox scripts, rebuild and restart containers so th
 
 ```bash
 ai-sandbox rebuild
+```
+
+To confirm home persistence across rebuild:
+
+```bash
+ais bash -lc 'echo ok > ~/.local/state/ai-sandbox-persist-check'
+ai-sandbox rebuild
+ais bash -lc 'cat ~/.local/state/ai-sandbox-persist-check'
 ```
 
 If dev-server "open in editor" links (error overlays, stack traces, click-to-open file links) open host VS Code instead of the sandbox window:

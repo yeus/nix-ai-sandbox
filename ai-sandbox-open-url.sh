@@ -44,6 +44,10 @@ if [[ "$url" == "https://vscode.dev/redirect"* || "$url" == "https://insiders.vs
   fi
 fi
 
+if [[ -x /usr/local/bin/ai-sandbox-default-install ]]; then
+  /usr/local/bin/ai-sandbox-default-install --only vscode
+fi
+
 exec code \
   --user-data-dir "${AI_SANDBOX_VSCODE_USER_DATA_DIR:-$HOME/.vscode-data}" \
   --extensions-dir "${AI_SANDBOX_VSCODE_EXTENSIONS_DIR:-$HOME/.vscode-extensions}" \

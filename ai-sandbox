@@ -21,6 +21,9 @@ Usage:
   ai-sandbox [start] [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--logs]
   ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME]
   ai-sandbox warm [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME]
+  ai-sandbox exec [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] -- COMMAND [ARGS...]
+  ai-sandbox install [WORKSPACE] [--force] [--only all|codex|vscode]
+  ai-sandbox build [WORKSPACE] [--force] [--only all|codex|vscode]
   ai-sandbox logs [WORKSPACE] [-f|--follow]
   ai-sandbox open-url URL
   ai-sandbox open-in-editor FILE [LINE] [COLUMN]
@@ -258,10 +261,14 @@ open_editor_col=""
 instance_arg=""
 follow_logs_on_start=0
 logs_follow=0
+exec_command=()
+workspace_explicit=0
+install_force=0
+install_only="all"
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    start|shell|warm|logs|build-base|rebuild|reset-storage|reset-volumes|repair-nix|open-url|open-in-editor|help|-h|--help)
+    start|shell|warm|exec|install|build|logs|build-base|rebuild|reset-storage|reset-volumes|repair-nix|open-url|open-in-editor|help|-h|--help)
       cmd="$1"
       shift
       ;;
@@ -273,6 +280,33 @@ fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --)
+      shift
+      if [[ "$cmd" == "exec" ]]; then
+        exec_command=("$@")
+        break
+      fi
+      ;;
+    --force)
+      if [[ "$cmd" == "install" || "$cmd" == "build" ]]; then
+        install_force=1
+        shift
+        continue
+      fi
+      echo "--force is only valid with install/build" >&2
+      exit 1
+      ;;
+    --only)
+      if [[ "$cmd" == "install" || "$cmd" == "build" ]]; then
+        shift
+        [[ $# -gt 0 ]] || { echo "--only requires all|codex|vscode" >&2; exit 1; }
+        install_only="$1"
+        shift
+        continue
+      fi
+      echo "--only is only valid with install/build" >&2
+      exit 1
+      ;;
     --flake)
       shift
       [[ $# -gt 0 ]] || { echo "--flake requires a path" >&2; exit 1; }
@@ -300,7 +334,16 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      if [[ "$cmd" == "open-url" && -z "$open_url_arg" ]]; then
+      if [[ "$cmd" == "exec" ]]; then
+        if [[ "$workspace_explicit" -eq 0 && -d "$1" ]]; then
+          workspace="$(realpath "$1")"
+          workspace_explicit=1
+          shift
+          continue
+        fi
+        exec_command=("$@")
+        break
+      elif [[ "$cmd" == "open-url" && -z "$open_url_arg" ]]; then
         open_url_arg="$1"
       elif [[ "$cmd" == "open-in-editor" ]]; then
         if [[ -z "$open_editor_file" ]]; then
@@ -324,6 +367,19 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$cmd" == "exec" && ${#exec_command[@]} -eq 0 ]]; then
+  echo "exec requires a command. Example: ai-sandbox exec -- codex --version" >&2
+  exit 2
+fi
+
+case "$install_only" in
+  all|codex|vscode) ;;
+  *)
+    echo "Invalid --only value: $install_only (expected all|codex|vscode)" >&2
+    exit 1
+    ;;
+esac
 
 case "$NETWORK_MODE" in
   host|bridge) ;;
@@ -350,6 +406,10 @@ case "$cmd" in
   build-base)
     podman build -t "$IMAGE" -f "$BUILD_CONTEXT/Dockerfile" "$BUILD_CONTEXT"
     exit 0
+    ;;
+  build)
+    podman build -t "$IMAGE" -f "$BUILD_CONTEXT/Dockerfile" "$BUILD_CONTEXT"
+    cmd="install"
     ;;
   rebuild)
     if podman image exists "$IMAGE"; then
@@ -463,9 +523,6 @@ case "$cmd" in
       target="$(map_host_target_for_container "$container" "$target")"
       exec podman exec "$container" bash -lc '
         editor_bin="$(command -v code || true)"
-        if [[ -z "$editor_bin" && -x /usr/bin/code ]]; then
-          editor_bin="/usr/bin/code"
-        fi
         if [[ -z "$editor_bin" ]]; then
           echo "No VS Code binary found inside sandbox container." >&2
           exit 127
@@ -536,7 +593,7 @@ fi
 workspace_hash="$(echo -n "$workspace" | sha256sum | cut -c1-12)"
 project_slug="$(sanitize_container_name_part "$project_name" "workspace")"
 launch_context="vscode"
-if [[ "$cmd" == "shell" || "$cmd" == "warm" ]]; then
+if [[ "$cmd" == "shell" || "$cmd" == "warm" || "$cmd" == "exec" ]]; then
   launch_context="shell"
 fi
 base_container_name="ai-sandbox-${project_slug}-${launch_context}-${workspace_hash}"
@@ -558,17 +615,28 @@ vscode_user_data_dir="/sandbox-home/.vscode-data/instances/$vscode_profile_id"
 vscode_extensions_dir="/sandbox-home/.vscode-extensions/shared"
 vscode_shared_user_dir="/sandbox-home/.vscode-shared-user"
 
-xauth_file="${XAUTHORITY:-$HOME/.Xauthority}"
-[[ -f "$xauth_file" ]] || { echo "Xauthority file not found: $xauth_file" >&2; exit 1; }
-
 theme="$(detect_theme)"
 
 dbus_args=()
-if [[ -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/bus" ]]; then
-  dbus_args=(
-    -e "DBUS_SESSION_BUS_ADDRESS=unix:path=/host-run-user-bus"
-    -v "${XDG_RUNTIME_DIR}/bus:/host-run-user-bus:rw"
+x11_args=()
+if [[ "$cmd" != "install" ]]; then
+  xauth_file="${XAUTHORITY:-$HOME/.Xauthority}"
+  [[ -f "$xauth_file" ]] || { echo "Xauthority file not found: $xauth_file" >&2; exit 1; }
+
+  x11_args=(
+    -e "DISPLAY=${DISPLAY:-:0}"
+    -e XAUTHORITY=/tmp/.Xauthority
+    -v /tmp/.X11-unix:/tmp/.X11-unix:ro
+    -v "$xauth_file:/tmp/.Xauthority:ro"
+    --device /dev/dri
   )
+
+  if [[ -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/bus" ]]; then
+    dbus_args=(
+      -e "DBUS_SESSION_BUS_ADDRESS=unix:path=/host-run-user-bus"
+      -v "${XDG_RUNTIME_DIR}/bus:/host-run-user-bus:rw"
+    )
+  fi
 fi
 
 common_args=(
@@ -581,8 +649,6 @@ common_args=(
   --label "ai-sandbox.workspace=$workspace"
   --label "ai-sandbox.workspace-hash=$workspace_hash"
   --label "ai-sandbox.instance=$instance_arg"
-  -e "DISPLAY=${DISPLAY:-:0}"
-  -e XAUTHORITY=/tmp/.Xauthority
   -e HOME=/sandbox-home
   -e XDG_RUNTIME_DIR=/tmp/xdg-runtime
   -e "AI_SANDBOX_MODE=$cmd"
@@ -596,12 +662,10 @@ common_args=(
   -e "AI_SANDBOX_VSCODE_USER_DATA_DIR=$vscode_user_data_dir"
   -e "AI_SANDBOX_VSCODE_EXTENSIONS_DIR=$vscode_extensions_dir"
   -e "AI_SANDBOX_VSCODE_SHARED_USER_DIR=$vscode_shared_user_dir"
-  -v /tmp/.X11-unix:/tmp/.X11-unix:ro
-  -v "$xauth_file:/tmp/.Xauthority:ro"
   -v "$mount_root:/workspace:Z"
   -v "$home_mount_spec"
   -v "$nix_mount_spec"
-  --device /dev/dri
+  "${x11_args[@]}"
 )
 
 network_args=()
@@ -610,6 +674,7 @@ if [[ "$NETWORK_MODE" == "host" ]]; then
 fi
 
 run_detached() {
+  echo "Starting sandbox container $container_name..."
   podman run --rm -d \
     "${common_args[@]}" \
     "${network_args[@]}" \
@@ -624,6 +689,7 @@ run_detached() {
 }
 
 run_interactive() {
+  echo "Starting interactive sandbox container $container_name..."
   podman run --rm -it \
     "${common_args[@]}" \
     "${network_args[@]}" \
@@ -631,8 +697,56 @@ run_interactive() {
     "$IMAGE"
 }
 
+run_exec() {
+  local existing_container existing_workspace env_dump
+
+  existing_container="$(pick_running_container_for_workspace "$workspace" || true)"
+  if [[ -n "$existing_container" ]]; then
+    echo "Reusing running sandbox container $existing_container..."
+    env_dump="$(podman inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$existing_container" 2>/dev/null || true)"
+    existing_workspace="$(printf '%s\n' "$env_dump" | sed -n 's/^AI_SANDBOX_WORKSPACE=//p' | head -n1)"
+    [[ -n "$existing_workspace" ]] || existing_workspace="/workspace"
+    echo "Running command in sandbox workspace $existing_workspace: ${exec_command[*]}"
+    exec podman exec -it "$existing_container" /bin/bash -lc 'cd "$1"; shift; exec "$@"' _ "$existing_workspace" "${exec_command[@]}"
+  fi
+
+  echo "No running sandbox found for workspace; starting temporary container..."
+  echo "Running command: ${exec_command[*]}"
+  exec podman run --rm -it \
+    "${common_args[@]}" \
+    "${network_args[@]}" \
+    "${dbus_args[@]}" \
+    "$IMAGE" "${exec_command[@]}"
+}
+
+run_install() {
+  local existing_container install_args=()
+  if [[ "$install_force" -eq 1 ]]; then
+    install_args+=(--force)
+  fi
+  install_args+=(--only "$install_only")
+
+  existing_container="$(pick_running_container_for_workspace "$workspace" || true)"
+  if [[ -n "$existing_container" ]]; then
+    echo "Reusing running sandbox container $existing_container for software install..."
+    echo "Install options: ${install_args[*]}"
+    exec podman exec -it "$existing_container" /usr/local/bin/ai-sandbox-default-install "${install_args[@]}"
+  fi
+
+  echo "No running sandbox found for workspace; starting temporary container for install..."
+  echo "Install options: ${install_args[*]}"
+  exec podman run --rm -it \
+    "${common_args[@]}" \
+    "${network_args[@]}" \
+    "${dbus_args[@]}" \
+    -e AI_SANDBOX_MODE=exec \
+    "$IMAGE" /usr/local/bin/ai-sandbox-default-install "${install_args[@]}"
+}
+
 case "$cmd" in
   start) run_detached ;;
   shell|warm) run_interactive ;;
+  exec) run_exec ;;
+  install) run_install ;;
   *) usage >&2; exit 1 ;;
 esac

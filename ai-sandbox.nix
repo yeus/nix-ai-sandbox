@@ -9,11 +9,19 @@ let
     cp ${./container-entrypoint.sh} "$out/container-entrypoint.sh"
     cp ${./ai-sandbox-open-url.sh} "$out/ai-sandbox-open-url.sh"
     cp ${./ai-sandbox-xdg-open.sh} "$out/ai-sandbox-xdg-open.sh"
+    cp ${./ai-sandbox-vscode-update.sh} "$out/ai-sandbox-vscode-update.sh"
+    cp ${./ai-sandbox-user-code.sh} "$out/ai-sandbox-user-code.sh"
+    cp ${./ai-sandbox-default-install.sh} "$out/ai-sandbox-default-install.sh"
+    cp ${./AGENTS.md} "$out/AGENTS.md"
     chmod 0644 \
       "$out/Dockerfile" \
       "$out/container-entrypoint.sh" \
       "$out/ai-sandbox-open-url.sh" \
-      "$out/ai-sandbox-xdg-open.sh"
+      "$out/ai-sandbox-xdg-open.sh" \
+      "$out/ai-sandbox-vscode-update.sh" \
+      "$out/ai-sandbox-user-code.sh" \
+      "$out/ai-sandbox-default-install.sh" \
+      "$out/AGENTS.md"
   '';
 
   aiSandboxScript = pkgs.writeShellScriptBin "ai-sandbox" ''
@@ -48,6 +56,17 @@ let
           fi
         fi
       fi
+    fi
+
+    if [[ "$#" -gt 0 ]]; then
+      case "$1" in
+        start|shell|warm|exec|install|build|logs|build-base|rebuild|reset-storage|reset-volumes|repair-nix|open-url|open-in-editor|help|-h|--help)
+          exec ${aiSandboxScript}/bin/ai-sandbox "$@"
+          ;;
+        *)
+          exec ${aiSandboxScript}/bin/ai-sandbox exec -- "$@"
+          ;;
+      esac
     fi
 
     exec ${aiSandboxScript}/bin/ai-sandbox "$@"

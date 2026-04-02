@@ -79,6 +79,10 @@ open_in_sandbox_code_if_file_target() {
     return 1
   fi
 
+  if [[ -x /usr/local/bin/ai-sandbox-default-install ]]; then
+    /usr/local/bin/ai-sandbox-default-install --only vscode
+  fi
+
   goto_target="$mapped_path"
   if [[ -n "$line_part" && -n "$col_part" ]]; then
     goto_target="${goto_target}:${line_part}:${col_part}"

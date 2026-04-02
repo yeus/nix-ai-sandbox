@@ -6,6 +6,8 @@ export USER="${USER:-sandbox}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}"
 export NIX_CONFIG="experimental-features = nix-command flakes"
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}"
+export PATH="$HOME/.local/bin:$NPM_CONFIG_PREFIX/bin:$HOME/.local/opt/vscode/bin:$PATH"
 
 mode="${AI_SANDBOX_MODE:-start}"
 workspace="${AI_SANDBOX_WORKSPACE:-/workspace}"
@@ -23,6 +25,10 @@ export vscode_shared_user_dir
 
 mkdir -p \
   "$HOME" \
+  "$HOME/.local/bin" \
+  "$NPM_CONFIG_PREFIX" \
+  "$NPM_CONFIG_PREFIX/bin" \
+  "$HOME/.local/opt" \
   "$vscode_user_data_dir" \
   "$vscode_extensions_dir" \
   "$vscode_shared_user_dir" \
@@ -30,6 +36,35 @@ mkdir -p \
   "$XDG_RUNTIME_DIR"
 
 chmod 700 "$XDG_RUNTIME_DIR" || true
+
+ensure_codex_default_instructions() {
+  local codex_dir default_agents target_agents disable_seed
+  codex_dir="$HOME/.codex"
+  default_agents="/usr/local/share/ai-sandbox/default-AGENTS.md"
+  target_agents="$codex_dir/AGENTS.md"
+  disable_seed="$codex_dir/.disable_default_agents_seed"
+
+  mkdir -p "$codex_dir"
+
+  if [[ -e "$disable_seed" ]]; then
+    return
+  fi
+
+  if [[ -f "$target_agents" || ! -f "$default_agents" ]]; then
+    return
+  fi
+
+  cp "$default_agents" "$target_agents"
+}
+
+ensure_default_user_software() {
+  if [[ ! -x /usr/local/bin/ai-sandbox-default-install ]]; then
+    return
+  fi
+  echo "AI_SANDBOX: checking default user-space software (Codex + VS Code)..."
+  /usr/local/bin/ai-sandbox-default-install --only all
+  echo "AI_SANDBOX: default user-space software is ready."
+}
 
 seed_nix_if_needed() {
   local nix_seeded=0
@@ -256,6 +291,7 @@ seed_nix_if_needed
 link_shared_vscode_user_files
 ensure_default_vscode_settings
 ensure_ai_shell_prompt_files
+ensure_codex_default_instructions
 
 if ! command -v nix >/dev/null 2>&1; then
   echo "nix still not found after seeding. PATH=$PATH" >&2
@@ -288,9 +324,13 @@ resolve_flake_target() {
 }
 
 flake_target=""
-if [[ "$mode" == "start" || "$mode" == "shell" || "$mode" == "warm" ]]; then
+if [[ "$mode" == "start" || "$mode" == "shell" || "$mode" == "warm" || "$mode" == "exec" ]]; then
   flake_target="$(resolve_flake_target)"
   cd "$workspace"
+fi
+
+if [[ "$mode" == "start" || "$mode" == "shell" || "$mode" == "exec" ]]; then
+  ensure_default_user_software
 fi
 
 print_nix_store_recovery_hint() {
@@ -446,6 +486,25 @@ case "$mode" in
       fi
     fi
     exec /bin/bash --noprofile --rcfile "$HOME/.ai-sandbox-bashrc" -i
+    ;;
+  exec)
+    [[ "$#" -gt 0 ]] || { echo "AI_SANDBOX: exec mode requires a command." >&2; exit 2; }
+
+    if [[ -n "$flake_target" ]]; then
+      if run_nix_develop_with_auto_repair preserve_stdout_tty "$@"; then
+        exit 0
+      fi
+      if [[ "$last_nix_develop_missing_default_devshell" == "1" ]]; then
+        echo "AI_SANDBOX: no default dev shell exported by $flake_target; running command without nix develop."
+        echo "Hint: pass --flake to a different flake, or add devShells.x86_64-linux.default if you want nix develop here."
+      else
+        echo "AI_SANDBOX: nix develop command execution failed; retrying command without nix develop."
+      fi
+      if [[ "$last_nix_develop_store_corruption" == "1" ]]; then
+        print_nix_store_recovery_hint
+      fi
+    fi
+    exec "$@"
     ;;
   start)
     if [[ -n "$flake_target" ]]; then
