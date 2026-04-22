@@ -197,6 +197,21 @@ ai-sandbox start . --network host
 ai-sandbox start . --network bridge
 ```
 
+Automatic network healing for long-running containers (default enabled):
+
+```bash
+ai-sandbox start . --auto-reconnect
+ai-sandbox start . --no-auto-reconnect
+ai-sandbox start . --auto-reconnect-interval 8
+```
+
+Diagnose or repair an already running sandbox after host network changes:
+
+```bash
+ai-sandbox doctor-net .
+ai-sandbox reconnect-network .
+```
+
 ## Typical usage
 
 In a flake-enabled repository:

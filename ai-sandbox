@@ -18,13 +18,15 @@ fi
 usage() {
   cat <<'EOF'
 Usage:
-  ai-sandbox [start] [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--logs]
+  ai-sandbox [start] [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--logs] [--auto-reconnect|--no-auto-reconnect] [--auto-reconnect-interval SECONDS]
   ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME]
   ai-sandbox warm [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME]
   ai-sandbox exec [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] -- COMMAND [ARGS...]
   ai-sandbox install [WORKSPACE] [--force] [--only all|codex|vscode]
   ai-sandbox build [WORKSPACE] [--force] [--only all|codex|vscode]
   ai-sandbox logs [WORKSPACE] [-f|--follow]
+  ai-sandbox doctor-net [WORKSPACE]
+  ai-sandbox reconnect-network [WORKSPACE]
   ai-sandbox open-url URL
   ai-sandbox open-in-editor FILE [LINE] [COLUMN]
   ai-sandbox repair-nix
@@ -251,6 +253,149 @@ pick_auto_instance_name() {
   echo "$preferred"
 }
 
+container_is_running() {
+  local container="$1"
+  [[ "$(podman inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" == "true" ]]
+}
+
+container_network_mode() {
+  local container="$1"
+  local env_dump mode
+  env_dump="$(podman inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null || true)"
+  mode="$(printf '%s\n' "$env_dump" | sed -n 's/^AI_SANDBOX_NETWORK_MODE=//p' | head -n1)"
+  if [[ -z "$mode" ]]; then
+    mode="$(podman inspect -f '{{.HostConfig.NetworkMode}}' "$container" 2>/dev/null || true)"
+  fi
+
+  if [[ "$mode" == "host" ]]; then
+    echo "host"
+    return
+  fi
+  echo "bridge"
+}
+
+probe_container_dns() {
+  local container="$1"
+  podman exec "$container" /bin/bash -lc 'getent hosts api.openai.com >/dev/null 2>&1'
+}
+
+probe_container_https_ip() {
+  local container="$1"
+  podman exec "$container" /bin/bash -lc 'curl -fsS --max-time 6 https://1.1.1.1 >/dev/null 2>&1'
+}
+
+sync_container_resolver_from_host() {
+  local container="$1"
+  local host_resolv
+  host_resolv="$(cat /etc/resolv.conf 2>/dev/null || true)"
+  [[ -n "$host_resolv" ]] || return 1
+  printf '%s\n' "$host_resolv" | podman exec -i --user 0 "$container" /bin/sh -lc 'cat >/etc/resolv.conf'
+}
+
+network_fingerprint() {
+  {
+    ip route show default 2>/dev/null || true
+    cat /etc/resolv.conf 2>/dev/null || true
+  } | sha256sum | awk '{print $1}'
+}
+
+reconnect_container_network() {
+  local container="$1"
+  local source="${2:-manual}"
+  local mode dns_before ip_before dns_after ip_after
+
+  if ! container_is_running "$container"; then
+    echo "AI_SANDBOX_NET[$source]: container is not running: $container" >&2
+    return 1
+  fi
+
+  mode="$(container_network_mode "$container")"
+  dns_before="fail"
+  ip_before="fail"
+  dns_after="fail"
+  ip_after="fail"
+
+  if probe_container_dns "$container"; then
+    dns_before="ok"
+  fi
+  if probe_container_https_ip "$container"; then
+    ip_before="ok"
+  fi
+
+  echo "AI_SANDBOX_NET[$source]: precheck container=$container mode=$mode dns=$dns_before ip=$ip_before"
+
+  if [[ "$mode" == "host" ]]; then
+    if sync_container_resolver_from_host "$container"; then
+      echo "AI_SANDBOX_NET[$source]: synced /etc/resolv.conf from host"
+    else
+      echo "AI_SANDBOX_NET[$source]: resolver sync failed (continuing with probes)" >&2
+    fi
+  else
+    echo "AI_SANDBOX_NET[$source]: skipping resolver sync in bridge mode"
+  fi
+
+  if probe_container_dns "$container"; then
+    dns_after="ok"
+  fi
+  if probe_container_https_ip "$container"; then
+    ip_after="ok"
+  fi
+
+  echo "AI_SANDBOX_NET[$source]: postcheck container=$container dns=$dns_after ip=$ip_after"
+
+  if [[ "$dns_after" == "ok" ]]; then
+    return 0
+  fi
+  if [[ "$ip_after" == "ok" ]]; then
+    return 2
+  fi
+  return 1
+}
+
+maybe_start_auto_reconnect_watcher() {
+  local container="$1"
+  local mode="$2"
+  local interval="$3"
+  local pid_file watcher_log watcher_pid
+
+  if [[ "$mode" != "host" ]]; then
+    echo "Auto-reconnect watcher skipped for non-host network mode."
+    return 0
+  fi
+
+  pid_file="$STATE_DIR/network-watcher-${container}.pid"
+  watcher_log="$STATE_DIR/network-watcher-${container}.log"
+
+  if [[ -f "$pid_file" ]]; then
+    watcher_pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ -n "$watcher_pid" ]] && kill -0 "$watcher_pid" 2>/dev/null; then
+      echo "Auto-reconnect watcher already running (pid=$watcher_pid)."
+      return 0
+    fi
+  fi
+
+  (
+    prev_fp="$(network_fingerprint)"
+    echo "AI_SANDBOX_NET[watcher]: started for $container interval=${interval}s"
+
+    while container_is_running "$container"; do
+      sleep "$interval"
+      current_fp="$(network_fingerprint)"
+      if [[ "$current_fp" != "$prev_fp" ]]; then
+        echo "AI_SANDBOX_NET[watcher]: host network fingerprint changed; reconnecting..."
+        reconnect_container_network "$container" "auto" || true
+        prev_fp="$current_fp"
+      fi
+    done
+
+    echo "AI_SANDBOX_NET[watcher]: stopping for $container"
+    rm -f "$pid_file"
+  ) >>"$watcher_log" 2>&1 &
+
+  echo "$!" > "$pid_file"
+  echo "Started auto-reconnect watcher (pid=$!, log=$watcher_log)."
+}
+
 cmd="start"
 workspace="$PWD"
 flake_arg=""
@@ -265,10 +410,12 @@ exec_command=()
 workspace_explicit=0
 install_force=0
 install_only="all"
+auto_reconnect="${AI_SANDBOX_AUTO_RECONNECT:-1}"
+auto_reconnect_interval="${AI_SANDBOX_AUTO_RECONNECT_INTERVAL:-8}"
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    start|shell|warm|exec|install|build|logs|build-base|rebuild|reset-storage|reset-volumes|repair-nix|open-url|open-in-editor|help|-h|--help)
+    start|shell|warm|exec|install|build|logs|doctor-net|reconnect-network|build-base|rebuild|reset-storage|reset-volumes|repair-nix|open-url|open-in-editor|help|-h|--help)
       cmd="$1"
       shift
       ;;
@@ -327,6 +474,20 @@ while [[ $# -gt 0 ]]; do
       ;;
     --logs)
       follow_logs_on_start=1
+      shift
+      ;;
+    --auto-reconnect)
+      auto_reconnect=1
+      shift
+      ;;
+    --no-auto-reconnect)
+      auto_reconnect=0
+      shift
+      ;;
+    --auto-reconnect-interval)
+      shift
+      [[ $# -gt 0 ]] || { echo "--auto-reconnect-interval requires seconds" >&2; exit 1; }
+      auto_reconnect_interval="$1"
       shift
       ;;
     -f|--follow)
@@ -389,6 +550,16 @@ case "$NETWORK_MODE" in
     ;;
 esac
 
+if ! [[ "$auto_reconnect" =~ ^[01]$ ]]; then
+  echo "Invalid auto reconnect value: $auto_reconnect (expected 0 or 1)" >&2
+  exit 1
+fi
+
+if ! [[ "$auto_reconnect_interval" =~ ^[0-9]+$ ]] || [[ "$auto_reconnect_interval" -lt 2 ]]; then
+  echo "Invalid --auto-reconnect-interval value: $auto_reconnect_interval (expected integer >= 2)" >&2
+  exit 1
+fi
+
 if [[ "$cmd" == "start" || "$cmd" == "shell" || "$cmd" == "warm" ]]; then
   ensure_vscode_url_handler
 fi
@@ -433,6 +604,63 @@ case "$cmd" in
     else
       exec podman logs "$target_container"
     fi
+    ;;
+  doctor-net)
+    if [[ -n "${workspace:-}" && -d "$workspace" ]]; then
+      workspace="$(realpath "$workspace")"
+      target_container="$(pick_running_container_for_workspace "$workspace")"
+      [[ -n "${target_container:-}" ]] || target_container="$(pick_running_container)"
+    else
+      target_container="$(pick_running_container)"
+    fi
+
+    [[ -n "${target_container:-}" ]] || { echo "No AI sandbox container found." >&2; exit 1; }
+    container_mode="$(container_network_mode "$target_container")"
+    host_default_route="$(ip route show default 2>/dev/null | head -n1 || true)"
+    host_dns="$(awk '/^nameserver /{print $2}' /etc/resolv.conf 2>/dev/null | xargs || true)"
+    container_dns="$(podman exec "$target_container" /bin/bash -lc "awk '/^nameserver /{print \\$2}' /etc/resolv.conf | xargs" 2>/dev/null || true)"
+    container_proxy="$(podman exec "$target_container" /bin/bash -lc "env | grep -Ei '^(http|https|no)_proxy='" 2>/dev/null || true)"
+
+    dns_status="fail"
+    ip_status="fail"
+    if probe_container_dns "$target_container"; then dns_status="ok"; fi
+    if probe_container_https_ip "$target_container"; then ip_status="ok"; fi
+
+    echo "AI_SANDBOX_NET_DOCTOR: container=$target_container mode=$container_mode"
+    echo "AI_SANDBOX_NET_DOCTOR: host_default_route=${host_default_route:-<none>}"
+    echo "AI_SANDBOX_NET_DOCTOR: host_nameservers=${host_dns:-<none>}"
+    echo "AI_SANDBOX_NET_DOCTOR: container_nameservers=${container_dns:-<none>}"
+    echo "AI_SANDBOX_NET_DOCTOR: container_dns_probe=$dns_status container_ip_probe=$ip_status"
+    if [[ -n "$container_proxy" ]]; then
+      echo "AI_SANDBOX_NET_DOCTOR: container_proxy_env:"
+      echo "$container_proxy"
+    else
+      echo "AI_SANDBOX_NET_DOCTOR: container_proxy_env=<none>"
+    fi
+
+    if [[ "$dns_status" == "ok" ]]; then
+      echo "AI_SANDBOX_NET_DOCTOR: result=healthy"
+      exit 0
+    fi
+    if [[ "$ip_status" == "ok" ]]; then
+      echo "AI_SANDBOX_NET_DOCTOR: result=dns-broken (try: ai-sandbox reconnect-network ${workspace:-.})"
+      exit 2
+    fi
+    echo "AI_SANDBOX_NET_DOCTOR: result=network-broken"
+    exit 1
+    ;;
+  reconnect-network)
+    if [[ -n "${workspace:-}" && -d "$workspace" ]]; then
+      workspace="$(realpath "$workspace")"
+      target_container="$(pick_running_container_for_workspace "$workspace")"
+      [[ -n "${target_container:-}" ]] || target_container="$(pick_running_container)"
+    else
+      target_container="$(pick_running_container)"
+    fi
+
+    [[ -n "${target_container:-}" ]] || { echo "No AI sandbox container found." >&2; exit 1; }
+    reconnect_container_network "$target_container" "manual"
+    exit $?
     ;;
   reset-storage|reset-volumes)
     # Stop/remove running AI sandbox containers first so storage can be removed.
@@ -658,6 +886,7 @@ common_args=(
   -e "AI_SANDBOX_CONTAINER_MOUNT_ROOT=/workspace"
   -e "AI_SANDBOX_PROJECT_NAME=$project_name"
   -e "AI_SANDBOX_INSTANCE_NAME=$instance_arg"
+  -e "AI_SANDBOX_NETWORK_MODE=$NETWORK_MODE"
   -e "AI_SANDBOX_THEME=$theme"
   -e "AI_SANDBOX_VSCODE_USER_DATA_DIR=$vscode_user_data_dir"
   -e "AI_SANDBOX_VSCODE_EXTENSIONS_DIR=$vscode_extensions_dir"
@@ -674,6 +903,7 @@ if [[ "$NETWORK_MODE" == "host" ]]; then
 fi
 
 run_detached() {
+  local mode
   echo "Starting sandbox container $container_name..."
   podman run --rm -d \
     "${common_args[@]}" \
@@ -681,6 +911,12 @@ run_detached() {
     "${dbus_args[@]}" \
     "$IMAGE" >/dev/null
   echo "Started $container_name"
+  mode="$(container_network_mode "$container_name")"
+  if [[ "$auto_reconnect" == "1" ]]; then
+    maybe_start_auto_reconnect_watcher "$container_name" "$mode" "$auto_reconnect_interval"
+  else
+    echo "Auto-reconnect watcher disabled."
+  fi
   follow_startup_logs_until_vscode "$container_name"
   if [[ "$follow_logs_on_start" -eq 1 ]]; then
     echo "Continuing to follow logs for $container_name (Ctrl-C to stop following; container keeps running)..."
@@ -703,6 +939,9 @@ run_exec() {
   existing_container="$(pick_running_container_for_workspace "$workspace" || true)"
   if [[ -n "$existing_container" ]]; then
     echo "Reusing running sandbox container $existing_container..."
+    if [[ "$auto_reconnect" == "1" ]]; then
+      reconnect_container_network "$existing_container" "pre-exec" || true
+    fi
     env_dump="$(podman inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$existing_container" 2>/dev/null || true)"
     existing_workspace="$(printf '%s\n' "$env_dump" | sed -n 's/^AI_SANDBOX_WORKSPACE=//p' | head -n1)"
     [[ -n "$existing_workspace" ]] || existing_workspace="/workspace"
