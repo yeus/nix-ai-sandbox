@@ -41,12 +41,11 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     xz-utils \
     zip \
- && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://starship.rs/install.sh | sh -s -- --yes
 RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
-# --- install Node.js (LTS, proper version, not Ubuntu garbage) ---
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     npm install -g npm@latest
@@ -54,8 +53,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 RUN useradd -m -s /bin/bash dev
 
 RUN mkdir -p /sandbox-home /workspace /nix \
- && chown -R dev:dev /sandbox-home /workspace /nix \
- && chmod 0777 /sandbox-home /workspace /nix
+    && chown -R dev:dev /sandbox-home /workspace /nix \
+    && chmod 0777 /sandbox-home /workspace /nix
 
 USER dev
 WORKDIR /home/dev
@@ -64,27 +63,22 @@ RUN curl -L https://nixos.org/nix/install | sh -s -- --no-daemon
 
 USER root
 
-RUN NIX_BIN="$(readlink -f /home/dev/.nix-profile/bin/nix)" && \
-    NIX_ENV_BIN="$(readlink -f /home/dev/.nix-profile/bin/nix-env)" && \
-    NIX_STORE_BIN="$(readlink -f /home/dev/.nix-profile/bin/nix-store)" && \
-    NIX_SHELL_BIN="$(readlink -f /home/dev/.nix-profile/bin/nix-shell)" && \
-    NIX_INSTANTIATE_BIN="$(readlink -f /home/dev/.nix-profile/bin/nix-instantiate)" && \
-    ln -sf "$NIX_BIN" /usr/local/bin/nix && \
-    ln -sf "$NIX_ENV_BIN" /usr/local/bin/nix-env && \
-    ln -sf "$NIX_STORE_BIN" /usr/local/bin/nix-store && \
-    ln -sf "$NIX_SHELL_BIN" /usr/local/bin/nix-shell && \
-    ln -sf "$NIX_INSTANTIATE_BIN" /usr/local/bin/nix-instantiate
+RUN ln -sf /home/dev/.nix-profile/bin/nix /usr/local/bin/nix && \
+    [ ! -e /home/dev/.nix-profile/bin/nix-env ] || ln -sf /home/dev/.nix-profile/bin/nix-env /usr/local/bin/nix-env && \
+    [ ! -e /home/dev/.nix-profile/bin/nix-store ] || ln -sf /home/dev/.nix-profile/bin/nix-store /usr/local/bin/nix-store && \
+    [ ! -e /home/dev/.nix-profile/bin/nix-shell ] || ln -sf /home/dev/.nix-profile/bin/nix-shell /usr/local/bin/nix-shell && \
+    [ ! -e /home/dev/.nix-profile/bin/nix-instantiate ] || ln -sf /home/dev/.nix-profile/bin/nix-instantiate /usr/local/bin/nix-instantiate
 
 RUN mkdir -p /nix-seed \
- && rsync -a \
-      --exclude='/var/nix/gc.lock' \
-      --exclude='/var/nix/db/big-lock' \
-      --exclude='/var/nix/db/reserved' \
-      --exclude='/var/nix/temproots/***' \
-      --exclude='/var/nix/userpool/***' \
-      --exclude='/var/nix/daemon-socket/***' \
-      /nix/ /nix-seed/ \
- && chmod -R a+rX /nix-seed
+    && rsync -a \
+    --exclude='/var/nix/gc.lock' \
+    --exclude='/var/nix/db/big-lock' \
+    --exclude='/var/nix/db/reserved' \
+    --exclude='/var/nix/temproots/***' \
+    --exclude='/var/nix/userpool/***' \
+    --exclude='/var/nix/daemon-socket/***' \
+    /nix/ /nix-seed/ \
+    && chmod -R a+rX /nix-seed
 
 COPY container-entrypoint.sh /usr/local/bin/container-entrypoint.sh
 COPY ai-sandbox-open-url.sh /usr/local/bin/ai-sandbox-open-url
@@ -94,9 +88,6 @@ COPY ai-sandbox-user-code.sh /usr/local/bin/ai-sandbox-user-code
 COPY ai-sandbox-default-install.sh /usr/local/bin/ai-sandbox-default-install
 COPY AGENTS.md /usr/local/share/ai-sandbox/default-AGENTS.md
 
-# Some VS Code auth flows invoke `xdg-open` directly instead of respecting the
-# BROWSER env var, so replace both the PATH-shadowed and system xdg-open entry
-# points to preserve host-browser opens.
 RUN chmod +x \
     /usr/local/bin/container-entrypoint.sh \
     /usr/local/bin/ai-sandbox-open-url \
@@ -104,9 +95,9 @@ RUN chmod +x \
     /usr/local/bin/ai-sandbox-vscode-update \
     /usr/local/bin/ai-sandbox-user-code \
     /usr/local/bin/ai-sandbox-default-install \
- && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/local/bin/xdg-open \
- && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/bin/xdg-open \
- && ln -sf /usr/local/bin/ai-sandbox-user-code /usr/local/bin/code
+    && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/local/bin/xdg-open \
+    && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/bin/xdg-open \
+    && ln -sf /usr/local/bin/ai-sandbox-user-code /usr/local/bin/code
 
 ENV PATH=/usr/local/bin:/usr/bin:/bin
 

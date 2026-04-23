@@ -73,6 +73,7 @@ seed_nix_if_needed() {
   # Seed PATH with common Nix profile locations up front.
   for candidate in \
     "/nix/var/nix/profiles/default/bin" \
+    "/nix/var/nix/profiles/per-user/dev/profile/bin" \
     "/nix/var/nix/profiles/per-user/${USER}/profile/bin" \
     "$HOME/.nix-profile/bin" \
     "/home/dev/.nix-profile/bin" \
@@ -105,6 +106,7 @@ seed_nix_if_needed() {
   if [[ "$nix_seeded" -eq 1 ]]; then
     for candidate in \
       "/nix/var/nix/profiles/default/bin" \
+      "/nix/var/nix/profiles/per-user/dev/profile/bin" \
       "/nix/var/nix/profiles/per-user/${USER}/profile/bin" \
       "$HOME/.nix-profile/bin" \
       "/home/dev/.nix-profile/bin" \
