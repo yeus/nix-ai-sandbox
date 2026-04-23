@@ -67,11 +67,26 @@ ensure_default_user_software() {
 }
 
 seed_nix_if_needed() {
-  local nix_seeded=0
+  local candidate
 
-  # Login profile scripts are not guaranteed in non-login shells.
-  # Seed PATH with common Nix profile locations up front.
+  mkdir -p /nix
+
+  # Always merge the baked image seed into the mounted /nix cache first.
+  # Runtime uses a bind-mounted /nix, so build-time nix profile symlinks may
+  # be broken until this seed has been copied in.
+  if [[ -d /nix-seed ]]; then
+    rsync -a /nix-seed/ /nix/
+  fi
+
+  mkdir -p \
+    /nix/var/nix/db \
+    /nix/var/nix/gcroots \
+    /nix/var/nix/profiles \
+    /nix/var/nix/temproots \
+    /nix/var/nix/userpool
+
   for candidate in \
+    "/usr/local/bin" \
     "/nix/var/nix/profiles/default/bin" \
     "/nix/var/nix/profiles/per-user/dev/profile/bin" \
     "/nix/var/nix/profiles/per-user/${USER}/profile/bin" \
@@ -84,41 +99,59 @@ seed_nix_if_needed() {
     fi
   done
   export PATH
+  hash -r
+}
+
+find_nix_bin_dir() {
+  local candidate
+  for candidate in \
+    "/usr/local/bin" \
+    "/nix/var/nix/profiles/default/bin" \
+    "/nix/var/nix/profiles/per-user/dev/profile/bin" \
+    "/nix/var/nix/profiles/per-user/${USER}/profile/bin" \
+    "$HOME/.nix-profile/bin" \
+    "/home/dev/.nix-profile/bin" \
+    "/root/.nix-profile/bin"
+  do
+    if [[ -x "$candidate/nix" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  candidate="$(find /nix/store -maxdepth 3 -type f -path '*/bin/nix' 2>/dev/null | head -n1 || true)"
+  if [[ -n "$candidate" ]]; then
+    dirname "$candidate"
+    return 0
+  fi
+
+  return 1
+}
+
+repair_nix_command_symlinks() {
+  local nix_bin_dir cmd target_dir
 
   if command -v nix >/dev/null 2>&1; then
     return
   fi
 
-  mkdir -p /nix
-
-  # A pre-existing mounted /nix may miss the exact store path that this image's
-  # nix shim points to. Merge seed content even when /nix/store already exists.
-  rsync -a /nix-seed/ /nix/
-  nix_seeded=1
-
-  mkdir -p \
-    /nix/var/nix/db \
-    /nix/var/nix/gcroots \
-    /nix/var/nix/profiles \
-    /nix/var/nix/temproots \
-    /nix/var/nix/userpool
-
-  if [[ "$nix_seeded" -eq 1 ]]; then
-    for candidate in \
-      "/nix/var/nix/profiles/default/bin" \
-      "/nix/var/nix/profiles/per-user/dev/profile/bin" \
-      "/nix/var/nix/profiles/per-user/${USER}/profile/bin" \
-      "$HOME/.nix-profile/bin" \
-      "/home/dev/.nix-profile/bin" \
-      "/root/.nix-profile/bin"
-    do
-      if [[ -d "$candidate" && ":$PATH:" != *":$candidate:"* ]]; then
-        PATH="$candidate:$PATH"
-      fi
-    done
-    export PATH
+  if ! nix_bin_dir="$(find_nix_bin_dir)"; then
+    return
   fi
 
+  target_dir="$HOME/.local/bin"
+  mkdir -p "$target_dir"
+
+  for cmd in nix nix-store nix-env nix-shell nix-instantiate; do
+    if [[ -x "$nix_bin_dir/$cmd" ]]; then
+      ln -sfn "$nix_bin_dir/$cmd" "$target_dir/$cmd"
+    fi
+  done
+
+  if [[ ":$PATH:" != *":$target_dir:"* ]]; then
+    PATH="$target_dir:$PATH"
+    export PATH
+  fi
   hash -r
 }
 
@@ -290,15 +323,20 @@ EOF
 }
 
 seed_nix_if_needed
+repair_nix_command_symlinks
 link_shared_vscode_user_files
 ensure_default_vscode_settings
 ensure_ai_shell_prompt_files
 ensure_codex_default_instructions
 
+AI_SANDBOX_NIX_AVAILABLE=1
 if ! command -v nix >/dev/null 2>&1; then
-  echo "nix still not found after seeding. PATH=$PATH" >&2
-  exit 1
+  AI_SANDBOX_NIX_AVAILABLE=0
+  echo "AI_SANDBOX_WARNING: nix not found after seeding." >&2
+  echo "AI_SANDBOX_WARNING: PATH=$PATH" >&2
+  echo "AI_SANDBOX_WARNING: continuing without nix; nix-dependent features will degrade gracefully." >&2
 fi
+export AI_SANDBOX_NIX_AVAILABLE
 
 # Force external URL opens through the host browser via portal.
 export BROWSER=/usr/local/bin/ai-sandbox-xdg-open
@@ -362,6 +400,11 @@ run_nix_develop_with_auto_repair() {
   local stream_mode log_file status
   stream_mode="${1:-capture_all}"
   shift
+
+  if [[ "${AI_SANDBOX_NIX_AVAILABLE:-1}" != "1" ]]; then
+    return 127
+  fi
+
   log_file="$(mktemp)"
   last_nix_develop_missing_default_devshell=0
   last_nix_develop_store_corruption=0
