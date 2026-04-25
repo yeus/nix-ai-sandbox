@@ -1,15 +1,41 @@
-- Try to use functional programming style wherever possible: no side effects, no global variables, make sue of currying etc...
-- Be critical of what your users ask you to do when appropriate
-- code shouldn't be too fancy, but easy to understand!
-- explicit is better than implicit!
-- composition over inheritance
-- stay minimal:   e.g. no unnecessary CSS, only when asked, only implement whats necessary,  if you think its a good idea to add some more, ask first. 
-- functions shouldnt be too big  around 40 lines max maybe?
-- make sure, you adhere to the principal one function, one purpose., no side effects everything should be included in the function arguments...
-- search for project files and check if they contain any tests that you can run (don't run "large"  tests) but small tests e.g.  compiling, or running tsc or a linter in order ot get the code in order.  also maybe there is a dedicated code formatter and similar things...
-- when doing any visual things, make sure you to check if there are any color schemes..  don't just do some random CSS...  we need to adhere to the current colors and general style of an app... 
-- if you have to answer questions, always make sure, to give reasons why, not "just answer".
-- it is very important, that you don't make tests "easier"  in order to make them work. but rather find the underlying issues that make the test fail and correct them.
-- when working on plans and things like that, you can be very specific and concise..  e.g. if you propose a new or want to modufy a function, you could show us the proposed function signature if it makes sense in the context...
-- when writing/editing code make sure, to avoid redundant/duplicated code. Always try to write code with a single source of truth.
-- try to use explicit flow rather than implicit..  e.g. for vue, this means, try to use watchers not too often and rather to explicit updates with functions. Watchers are hard to track...
+# AGENTS.md instructions for /workspace/ai-sandbox
+
+## Priority order (highest first)
+1. Correctness and requested scope
+2. Simplicity and explicit flow
+3. Functional style and composition
+4. Lightweight quality checks
+
+If rules conflict, follow the higher-priority rule and state the tradeoff briefly.
+
+## Coding principles
+- Use functional style where practical: avoid hidden side effects, avoid global state, pass dependencies as function arguments, and prefer composition over inheritance.
+- Code should be easy to understand, not fancy. Explicit is better than implicit.
+- Keep functions focused: one function, one purpose.
+- Target function size around 40 lines max. If longer is needed, split by responsibility or explain why.
+- Avoid duplicate logic; keep a single source of truth.
+- Be critical when appropriate: if a request is risky or unclear, say so and suggest a safer approach.
+
+## Scope and minimalism
+- Stay minimal: implement only what was requested.
+- Do not add extra CSS or UI changes unless requested.
+- If additional improvements seem useful but optional, ask first.
+
+## Quality checks
+- Search the project for relevant checks and run lightweight ones after changes.
+- Preferred checks: compile/type-check, linter, targeted tests, and formatter checks if configured.
+- Do not run large/slow test suites unless explicitly requested.
+- Never weaken tests to make them pass; fix the root cause instead.
+
+## Visual and UI changes
+- Check existing color schemes and current app style before changing visuals.
+- Do not introduce random styling; follow the established design language.
+
+## Communication expectations
+- When answering questions, provide reasons, not just conclusions.
+- When proposing plans or function changes, be concise and specific.
+- When useful, include the proposed function signature.
+
+## Framework-specific guidance
+- Prefer explicit control flow over implicit behavior.
+- For Vue, avoid overusing watchers; prefer explicit updates via functions where possible.
