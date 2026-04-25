@@ -67,15 +67,29 @@ ensure_default_user_software() {
 }
 
 seed_nix_if_needed() {
-  local candidate
+  local candidate seed_marker lock_file lock_fd
+  seed_marker="/nix/.ai-sandbox-seed-v2.done"
+  lock_file="/nix/.ai-sandbox-seed.lock"
+  lock_fd=9
 
   mkdir -p /nix
 
-  # Always merge the baked image seed into the mounted /nix cache first.
-  # Runtime uses a bind-mounted /nix, so build-time nix profile symlinks may
-  # be broken until this seed has been copied in.
-  if [[ -d /nix-seed ]]; then
-    rsync -a /nix-seed/ /nix/
+  # Seed mounted /nix exactly once and never copy Nix runtime DB/locks from the
+  # image into a live cache.
+  if [[ -d /nix-seed && ! -e "$seed_marker" ]]; then
+    exec {lock_fd}>"$lock_file"
+    flock "$lock_fd"
+    if [[ ! -e "$seed_marker" ]]; then
+      rsync -a --ignore-existing \
+        --exclude='/var/nix/db/***' \
+        --exclude='/var/nix/gc.lock' \
+        --exclude='/var/nix/temproots/***' \
+        --exclude='/var/nix/userpool/***' \
+        --exclude='/var/nix/daemon-socket/***' \
+        /nix-seed/ /nix/
+      touch "$seed_marker"
+    fi
+    flock -u "$lock_fd"
   fi
 
   mkdir -p \

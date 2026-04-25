@@ -334,6 +334,14 @@ ai-sandbox repair-nix
 
 This verifies and repairs the shared ai-sandbox `/nix` cache without deleting it.
 
+If you see `database disk image is malformed` for `/nix/var/nix/db/db.sqlite`:
+
+1. Stop running ai-sandbox containers for this workspace.
+2. Run `ai-sandbox repair-nix`.
+3. If it still fails, run `ai-sandbox reset-storage` to recreate shared caches from scratch.
+
+Recent ai-sandbox versions now seed `/nix` only once and avoid copying seeded Nix DB runtime files into a live cache, which reduces the chance of this corruption pattern.
+
 If you recently changed ai-sandbox scripts, rebuild and restart containers so the new entrypoint is used:
 
 ```bash
