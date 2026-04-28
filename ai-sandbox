@@ -849,15 +849,22 @@ dbus_args=()
 x11_args=()
 if [[ "$cmd" != "install" ]]; then
   xauth_file="${XAUTHORITY:-$HOME/.Xauthority}"
-  [[ -f "$xauth_file" ]] || { echo "Xauthority file not found: $xauth_file" >&2; exit 1; }
+  if [[ -n "${DISPLAY:-}" && -d /tmp/.X11-unix ]]; then
+    x11_args+=(
+      -e "DISPLAY=$DISPLAY"
+      -v /tmp/.X11-unix:/tmp/.X11-unix:ro
+      --device /dev/dri
+    )
 
-  x11_args=(
-    -e "DISPLAY=${DISPLAY:-:0}"
-    -e XAUTHORITY=/tmp/.Xauthority
-    -v /tmp/.X11-unix:/tmp/.X11-unix:ro
-    -v "$xauth_file:/tmp/.Xauthority:ro"
-    --device /dev/dri
-  )
+    if [[ -f "$xauth_file" ]]; then
+      x11_args+=(
+        -e XAUTHORITY=/tmp/.Xauthority
+        -v "$xauth_file:/tmp/.Xauthority:ro"
+      )
+    else
+      echo "Warning: Xauthority file not found ($xauth_file); continuing without Xauthority mount." >&2
+    fi
+  fi
 
   if [[ -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/bus" ]]; then
     dbus_args=(
