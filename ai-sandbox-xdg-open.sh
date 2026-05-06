@@ -7,8 +7,9 @@ if [[ -z "$url" ]]; then
   exit 1
 fi
 
-if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
-  echo "DBUS_SESSION_BUS_ADDRESS is not set; cannot reach host portal." >&2
+host_bus="${AI_SANDBOX_HOST_DBUS_SESSION_BUS_ADDRESS:-}"
+if [[ -z "$host_bus" ]]; then
+  echo "AI_SANDBOX_HOST_DBUS_SESSION_BUS_ADDRESS is not set; cannot reach host portal." >&2
   exit 1
 fi
 
@@ -102,7 +103,7 @@ fi
 
 # Prefer desktop portal to open non-file targets in the host browser.
 # Parent window is empty string because we are in a containerized X11 app.
-exec gdbus call \
+exec env DBUS_SESSION_BUS_ADDRESS="$host_bus" gdbus call \
   --session \
   --dest org.freedesktop.portal.Desktop \
   --object-path /org/freedesktop/portal/desktop \

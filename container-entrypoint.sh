@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset DBUS_SESSION_BUS_ADDRESS
+export GTK_USE_PORTAL=0
 
 export HOME="${HOME:-/sandbox-home}"
 export USER="${USER:-sandbox}"
@@ -475,6 +477,8 @@ echo "AI_SANDBOX_VSCODE_DIRS: user-data=$vscode_user_data_dir extensions=$vscode
 launch_code_cmd='
   export BROWSER=/usr/local/bin/ai-sandbox-xdg-open
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}"
+  unset DBUS_SESSION_BUS_ADDRESS
+  export GTK_USE_PORTAL=0
 
   echo "AI_SANDBOX_READY_VSCODE: launching VS Code for $1"
   echo "AI_SANDBOX_HINT: VS Code inherits the environment from nix develop when a flake devShell is available."
