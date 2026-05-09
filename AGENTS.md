@@ -16,6 +16,12 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 - Avoid duplicate logic; keep a single source of truth.
 - Be critical when appropriate: if a request is risky or unclear, say so and suggest a safer approach.
 
+## bash commands for user
+
+- we are in a sandbox here, so the user can not copy long, single-line cli commands
+  without linebreaks.  You need to explicitly add line breaks and '\' and make sure,
+  a command never exceeds 50 chars width. Number of lines doesn't matter...
+
 ## Scope and minimalism
 - Stay minimal: implement only what was requested.
 - Do not add extra CSS or UI changes unless requested.
