@@ -38,6 +38,14 @@ Usage:
 EOF
 }
 
+ensure_image_exists() {
+  if podman image exists "$IMAGE"; then
+    return 0
+  fi
+  echo "Image '$IMAGE' not found locally. Building from $BUILD_CONTEXT..." >&2
+  podman build -t "$IMAGE" -f "$BUILD_CONTEXT/Dockerfile" "$BUILD_CONTEXT"
+}
+
 follow_startup_logs_until_vscode() {
   local container="$1"
   local marker="AI_SANDBOX_READY_VSCODE:"
@@ -764,6 +772,12 @@ case "$cmd" in
     fi
 
     exec code --goto "$target"
+    ;;
+esac
+
+case "$cmd" in
+  start|shell|warm|exec|install|repair-nix)
+    ensure_image_exists
     ;;
 esac
 
