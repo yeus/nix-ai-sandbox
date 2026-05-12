@@ -28,12 +28,21 @@ mkdir -p "$HOME/.local/bin" "$HOME/.local/opt" "$HOME/.npm-global/bin"
 export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}"
 export PATH="$HOME/.local/bin:$NPM_CONFIG_PREFIX/bin:$HOME/.local/opt/vscode/bin:$PATH"
 
+ts() {
+  date -u +'%Y-%m-%dT%H:%M:%SZ'
+}
+
+log_cmd() {
+  echo "[ai-sandbox][default-install][$(ts)] Running: $*"
+}
+
 install_codex() {
   if [[ "$force" -eq 0 ]] && command -v codex >/dev/null 2>&1; then
     echo "AI_SANDBOX: Codex already present in user space; skipping."
     return
   fi
   echo "AI_SANDBOX: installing Codex in user space..."
+  log_cmd npm install -g @openai/codex@latest
   npm install -g @openai/codex@latest
   echo "AI_SANDBOX: Codex installation complete."
 }
@@ -41,10 +50,12 @@ install_codex() {
 install_vscode() {
   echo "AI_SANDBOX: ensuring user-space VS Code is available..."
   if [[ "$force" -eq 1 ]]; then
+    log_cmd /usr/local/bin/ai-sandbox-vscode-update --force
     /usr/local/bin/ai-sandbox-vscode-update --force
     echo "AI_SANDBOX: VS Code forced update complete."
     return
   fi
+  log_cmd /usr/local/bin/ai-sandbox-vscode-update --if-missing
   /usr/local/bin/ai-sandbox-vscode-update --if-missing
   echo "AI_SANDBOX: VS Code check/install complete."
 }

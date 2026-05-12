@@ -112,6 +112,14 @@ detect_theme() {
   esac
 }
 
+selinux_mount_label_opt() {
+  if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; then
+    printf ':Z'
+    return 0
+  fi
+  printf ''
+}
+
 pick_running_container() {
   if [[ -f "$STATE_DIR/last-container" ]]; then
     local c
@@ -700,18 +708,19 @@ case "$cmd" in
   repair-nix)
     home_mount_spec=""
     nix_mount_spec=""
+    selinux_label_opt="$(selinux_mount_label_opt)"
     if [[ "$HOME_STORAGE" == /* ]]; then
       mkdir -p "$HOME_STORAGE"
-      home_mount_spec="$HOME_STORAGE:/sandbox-home:Z"
+      home_mount_spec="$HOME_STORAGE:/sandbox-home${selinux_label_opt}"
     else
-      home_mount_spec="$HOME_STORAGE:/sandbox-home:Z,U"
+      home_mount_spec="$HOME_STORAGE:/sandbox-home${selinux_label_opt},U"
     fi
 
     if [[ "$NIX_STORAGE" == /* ]]; then
       mkdir -p "$NIX_STORAGE"
-      nix_mount_spec="$NIX_STORAGE:/nix:Z"
+      nix_mount_spec="$NIX_STORAGE:/nix${selinux_label_opt}"
     else
-      nix_mount_spec="$NIX_STORAGE:/nix:Z,U"
+      nix_mount_spec="$NIX_STORAGE:/nix${selinux_label_opt},U"
     fi
 
     exec podman run --rm -it \
@@ -783,21 +792,22 @@ esac
 
 [[ -d "$workspace" ]] || { echo "Workspace does not exist: $workspace" >&2; exit 1; }
 project_name="$(basename "$workspace")"
+selinux_label_opt="$(selinux_mount_label_opt)"
 
 home_mount_spec=""
 nix_mount_spec=""
 if [[ "$HOME_STORAGE" == /* ]]; then
   mkdir -p "$HOME_STORAGE"
-  home_mount_spec="$HOME_STORAGE:/sandbox-home:Z"
+  home_mount_spec="$HOME_STORAGE:/sandbox-home${selinux_label_opt}"
 else
-  home_mount_spec="$HOME_STORAGE:/sandbox-home:Z,U"
+  home_mount_spec="$HOME_STORAGE:/sandbox-home${selinux_label_opt},U"
 fi
 
 if [[ "$NIX_STORAGE" == /* ]]; then
   mkdir -p "$NIX_STORAGE"
-  nix_mount_spec="$NIX_STORAGE:/nix:Z"
+  nix_mount_spec="$NIX_STORAGE:/nix${selinux_label_opt}"
 else
-  nix_mount_spec="$NIX_STORAGE:/nix:Z,U"
+  nix_mount_spec="$NIX_STORAGE:/nix${selinux_label_opt},U"
 fi
 
 mount_root="$workspace"
@@ -912,7 +922,7 @@ common_args=(
   -e "AI_SANDBOX_VSCODE_USER_DATA_DIR=$vscode_user_data_dir"
   -e "AI_SANDBOX_VSCODE_EXTENSIONS_DIR=$vscode_extensions_dir"
   -e "AI_SANDBOX_VSCODE_SHARED_USER_DIR=$vscode_shared_user_dir"
-  -v "$mount_root:/workspace:Z"
+  -v "$mount_root:/workspace${selinux_label_opt}"
   -v "$home_mount_spec"
   -v "$nix_mount_spec"
   "${x11_args[@]}"
@@ -981,26 +991,59 @@ run_exec() {
 
 run_install() {
   local existing_container install_args=()
+  local start_ts launch_ts run_start_ts run_end_ts
+  local -a podman_cmd
+  local podman_rc=0
+  start_ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+  echo "[ai-sandbox][install][$start_ts] Starting install flow for workspace: $workspace"
+  echo "[ai-sandbox][install][$start_ts] Image: $IMAGE | Network: $NETWORK_MODE"
+  if [[ -n "$selinux_label_opt" ]]; then
+    echo "[ai-sandbox][install][$start_ts] Mount labeling: enabled ($selinux_label_opt)"
+  else
+    echo "[ai-sandbox][install][$start_ts] Mount labeling: disabled (SELinux not enabled)"
+  fi
+
   if [[ "$install_force" -eq 1 ]]; then
     install_args+=(--force)
   fi
   install_args+=(--only "$install_only")
+  echo "[ai-sandbox][install][$start_ts] Install options: ${install_args[*]}"
 
+  echo "[ai-sandbox][install][$start_ts] Checking for an already running sandbox container..."
   existing_container="$(pick_running_container_for_workspace "$workspace" || true)"
   if [[ -n "$existing_container" ]]; then
-    echo "Reusing running sandbox container $existing_container for software install..."
-    echo "Install options: ${install_args[*]}"
+    echo "[ai-sandbox][install][$start_ts] Reusing running sandbox container: $existing_container"
+    echo "[ai-sandbox][install][$start_ts] Executing install script inside existing container..."
     exec podman exec -it "$existing_container" /usr/local/bin/ai-sandbox-default-install "${install_args[@]}"
   fi
 
-  echo "No running sandbox found for workspace; starting temporary container for install..."
-  echo "Install options: ${install_args[*]}"
-  exec podman run --rm -it \
+  launch_ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  echo "[ai-sandbox][install][$launch_ts] No running sandbox found for workspace."
+  echo "[ai-sandbox][install][$launch_ts] Starting temporary container for install..."
+  echo "[ai-sandbox][install][$launch_ts] If this step is slow, storage or container startup is likely the bottleneck."
+  echo "[ai-sandbox][install][$launch_ts] Podman store info:"
+  podman info --format '[ai-sandbox][install] graphDriver={{.Store.GraphDriverName}} graphRoot={{.Store.GraphRoot}} runRoot={{.Store.RunRoot}}' 2>/dev/null || \
+    echo "[ai-sandbox][install][$launch_ts] podman info unavailable"
+  echo "[ai-sandbox][install][$launch_ts] Launching: podman run --rm -it ... /usr/local/bin/ai-sandbox-default-install ${install_args[*]}"
+
+  podman_cmd=(podman)
+  if [[ "${AI_SANDBOX_PODMAN_DEBUG:-0}" == "1" ]]; then
+    echo "[ai-sandbox][install][$launch_ts] Podman debug mode enabled (AI_SANDBOX_PODMAN_DEBUG=1)."
+    podman_cmd+=(--log-level=debug)
+  fi
+
+  run_start_ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  echo "[ai-sandbox][install][$run_start_ts] Executing podman run now..."
+  "${podman_cmd[@]}" run --rm -it \
     "${common_args[@]}" \
     "${network_args[@]}" \
     "${host_dbus_args[@]}" \
     -e AI_SANDBOX_MODE=exec \
-    "$IMAGE" /usr/local/bin/ai-sandbox-default-install "${install_args[@]}"
+    "$IMAGE" /usr/local/bin/ai-sandbox-default-install "${install_args[@]}" || podman_rc=$?
+  run_end_ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  echo "[ai-sandbox][install][$run_end_ts] podman run exited with code: $podman_rc"
+  return "$podman_rc"
 }
 
 case "$cmd" in
