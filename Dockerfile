@@ -54,20 +54,21 @@ RUN useradd -m -s /bin/bash dev
 
 RUN mkdir -p /sandbox-home /workspace /nix \
     && chown -R dev:dev /sandbox-home /workspace /nix \
-    && chmod 0777 /sandbox-home /workspace /nix
+    && chmod 0777 /sandbox-home /workspace \
+    && chmod 0755 /nix
 
 USER dev
 WORKDIR /home/dev
 
-RUN curl -L https://nixos.org/nix/install | sh -s -- --no-daemon
+RUN umask 022 && curl -L https://nixos.org/nix/install | sh -s -- --no-daemon --no-modify-profile
 
 USER root
 
-RUN ln -sf /home/dev/.nix-profile/bin/nix /usr/local/bin/nix && \
-    [ ! -e /home/dev/.nix-profile/bin/nix-env ] || ln -sf /home/dev/.nix-profile/bin/nix-env /usr/local/bin/nix-env && \
-    [ ! -e /home/dev/.nix-profile/bin/nix-store ] || ln -sf /home/dev/.nix-profile/bin/nix-store /usr/local/bin/nix-store && \
-    [ ! -e /home/dev/.nix-profile/bin/nix-shell ] || ln -sf /home/dev/.nix-profile/bin/nix-shell /usr/local/bin/nix-shell && \
-    [ ! -e /home/dev/.nix-profile/bin/nix-instantiate ] || ln -sf /home/dev/.nix-profile/bin/nix-instantiate /usr/local/bin/nix-instantiate
+RUN ln -sf /nix/var/nix/profiles/default/bin/nix /usr/local/bin/nix && \
+    [ ! -e /nix/var/nix/profiles/default/bin/nix-env ] || ln -sf /nix/var/nix/profiles/default/bin/nix-env /usr/local/bin/nix-env && \
+    [ ! -e /nix/var/nix/profiles/default/bin/nix-store ] || ln -sf /nix/var/nix/profiles/default/bin/nix-store /usr/local/bin/nix-store && \
+    [ ! -e /nix/var/nix/profiles/default/bin/nix-shell ] || ln -sf /nix/var/nix/profiles/default/bin/nix-shell /usr/local/bin/nix-shell && \
+    [ ! -e /nix/var/nix/profiles/default/bin/nix-instantiate ] || ln -sf /nix/var/nix/profiles/default/bin/nix-instantiate /usr/local/bin/nix-instantiate
 
 RUN mkdir -p /nix-seed \
     && rsync -a \

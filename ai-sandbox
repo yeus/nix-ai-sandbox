@@ -588,7 +588,7 @@ case "$cmd" in
     ;;
   build)
     podman build -t "$IMAGE" -f "$BUILD_CONTEXT/Dockerfile" "$BUILD_CONTEXT"
-    cmd="install"
+    exit 0
     ;;
   rebuild)
     if podman image exists "$IMAGE"; then
