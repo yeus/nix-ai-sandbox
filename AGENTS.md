@@ -14,6 +14,9 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 - Keep functions focused: one function, one purpose.
 - Target function size around 40 lines max. If longer is needed, split by responsibility or explain why.
 - Avoid duplicate logic; keep a single source of truth.
+- Never write redundant code. Before adding new code, check whether equivalent logic already exists.
+- If the same behavior is needed in multiple places, extract it into a reusable function with explicit parameters instead of duplicating it.
+- Even when logic is only sufficiently similar (not identical), prefer abstraction over copy/paste: generalize it into a reusable function or break it into smaller composable functions with explicit inputs.
 - Be critical when appropriate: if a request is risky or unclear, say so and suggest a safer approach.
 
 ## bash commands for user
