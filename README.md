@@ -113,6 +113,22 @@ Repair shared ai-sandbox Nix cache in place (verify/repair store paths, no delet
 ai-sandbox repair-nix
 ```
 
+Sync global Codex instructions (sandbox-wide, not project-local):
+
+```bash
+ai-sandbox agents pull
+ai-sandbox agents push
+ai-sandbox agents pull --file ./AGENTS.md --force
+```
+
+Sync global Codex skills:
+
+```bash
+ai-sandbox skills pull
+ai-sandbox skills push
+ai-sandbox skills push --dir ./skills --force
+```
+
 Warm the current project flake into the shared `/nix` storage directory:
 
 ```bash
@@ -148,6 +164,13 @@ Open an interactive shell in the sandbox:
 
 ```bash
 ai-sandbox shell .
+```
+
+Run a command directly in shell mode (flake-aware):
+
+```bash
+ai-sandbox shell . -- codex
+ai-sandbox shell codex
 ```
 
 Run any command in the sandbox (auto-reuses a running workspace sandbox when available):
@@ -269,17 +292,35 @@ Sandbox home is persisted in `~/.cache/ai-sandbox/home` by default (configurable
 - `ai-sandbox build`, `ai-sandbox build-base`, and `ai-sandbox rebuild` do not erase sandbox home.
 - `ai-sandbox reset-storage` is the command that erases persisted home and nix storage.
 
+`CODEX_HOME` is pinned to:
+
+```bash
+/sandbox-home/.codex
+```
+
 Codex global instructions are seeded once (if missing) to:
 
 ```bash
-~/.codex/AGENTS.md
+/sandbox-home/.codex/AGENTS.md
 ```
 
-from:
+from image default:
 
 ```bash
-ai-sandbox/AGENTS.md
+/usr/local/share/ai-sandbox/default-AGENTS.md
 ```
+
+This means global instructions and skills are persisted on host storage and can
+be modified from any workspace. Project-local `AGENTS.md` remains separate.
+
+ai-sandbox also ensures `~/.codex/config.toml` contains:
+
+```toml
+[sandbox_workspace_write]
+writable_roots = ["/sandbox-home/.codex"]
+```
+
+so Codex started from `/workspace` can still edit global files in `CODEX_HOME`.
 
 To fully disable default seeding and erase global Codex instructions:
 

@@ -4,6 +4,7 @@ unset DBUS_SESSION_BUS_ADDRESS
 export GTK_USE_PORTAL=0
 
 export HOME="${HOME:-/sandbox-home}"
+export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 export USER="${USER:-sandbox}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}"
 export NIX_CONFIG="experimental-features = nix-command flakes"
@@ -41,7 +42,7 @@ chmod 700 "$XDG_RUNTIME_DIR" || true
 
 ensure_codex_default_instructions() {
   local codex_dir default_agents target_agents disable_seed
-  codex_dir="$HOME/.codex"
+  codex_dir="$CODEX_HOME"
   default_agents="/usr/local/share/ai-sandbox/default-AGENTS.md"
   target_agents="$codex_dir/AGENTS.md"
   disable_seed="$codex_dir/.disable_default_agents_seed"
@@ -57,6 +58,67 @@ ensure_codex_default_instructions() {
   fi
 
   cp "$default_agents" "$target_agents"
+}
+
+ensure_codex_global_writable_root() {
+  local codex_dir config_file root
+  codex_dir="$CODEX_HOME"
+  config_file="$codex_dir/config.toml"
+  root="/sandbox-home/.codex"
+
+  mkdir -p "$codex_dir"
+  [[ -f "$config_file" ]] || : >"$config_file"
+
+  if grep -Eq '^[[:space:]]*\[sandbox_workspace_write\][[:space:]]*$' "$config_file"; then
+    if grep -Fq "$root" "$config_file"; then
+      return
+    fi
+
+    if awk '
+      BEGIN { in_sec=0; done=0; found=0 }
+      /^[[:space:]]*\[sandbox_workspace_write\][[:space:]]*$/ { in_sec=1; next }
+      /^[[:space:]]*\[/ && in_sec==1 && !done {
+        if (!found) print "writable_roots = [\"/sandbox-home/.codex\"]"
+        done=1
+      }
+      in_sec==1 && /^[[:space:]]*writable_roots[[:space:]]*=/ { found=1 }
+      { next }
+      END {
+        if (in_sec==1 && !done && !found) print "writable_roots = [\"/sandbox-home/.codex\"]"
+      }
+    ' "$config_file" >/dev/null 2>&1; then
+      tmp_file="$(mktemp)"
+      awk '
+        BEGIN { in_sec=0; inserted=0 }
+        /^[[:space:]]*\[sandbox_workspace_write\][[:space:]]*$/ { in_sec=1; print; next }
+        /^[[:space:]]*\[/ && in_sec==1 && inserted==0 {
+          print "writable_roots = [\"/sandbox-home/.codex\"]"
+          inserted=1
+          in_sec=0
+        }
+        in_sec==1 && /^[[:space:]]*writable_roots[[:space:]]*=/ {
+          line=$0
+          sub(/\][[:space:]]*$/, ", \"/sandbox-home/.codex\"]", line)
+          print line
+          inserted=1
+          next
+        }
+        { print }
+        END {
+          if (in_sec==1 && inserted==0) print "writable_roots = [\"/sandbox-home/.codex\"]"
+        }
+      ' "$config_file" >"$tmp_file"
+      mv "$tmp_file" "$config_file"
+    fi
+    return
+  fi
+
+  {
+    echo ""
+    echo "# ai-sandbox managed: keep global Codex home writable from workspace-write sandbox."
+    echo "[sandbox_workspace_write]"
+    echo "writable_roots = [\"/sandbox-home/.codex\"]"
+  } >>"$config_file"
 }
 
 ensure_default_user_software() {
@@ -344,6 +406,7 @@ link_shared_vscode_user_files
 ensure_default_vscode_settings
 ensure_ai_shell_prompt_files
 ensure_codex_default_instructions
+ensure_codex_global_writable_root
 
 AI_SANDBOX_NIX_AVAILABLE=1
 if ! command -v nix >/dev/null 2>&1; then
@@ -520,6 +583,24 @@ case "$mode" in
     fi
     ;;
   shell)
+    if [[ "$#" -gt 0 ]]; then
+      if [[ -n "$flake_target" ]]; then
+        if run_nix_develop_with_auto_repair preserve_stdout_tty "$@"; then
+          exit 0
+        fi
+        if [[ "$last_nix_develop_missing_default_devshell" == "1" ]]; then
+          echo "AI_SANDBOX: no default dev shell exported by $flake_target; running command without nix develop."
+          echo "Hint: pass --flake to a different flake, or add devShells.x86_64-linux.default if you want nix develop here."
+        else
+          echo "AI_SANDBOX: nix develop command execution failed; running command without nix develop."
+        fi
+        if [[ "$last_nix_develop_store_corruption" == "1" ]]; then
+          print_nix_store_recovery_hint
+        fi
+      fi
+      exec "$@"
+    fi
+
     if [[ -n "$flake_target" ]]; then
       echo "AI_SANDBOX: preparing flake dev shell at $flake_target..."
       shell_started_file="$(mktemp)"

@@ -19,7 +19,7 @@ usage() {
   cat <<'EOF'
 Usage:
   ai-sandbox [start] [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--logs] [--auto-reconnect|--no-auto-reconnect] [--auto-reconnect-interval SECONDS]
-  ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME]
+  ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [-- COMMAND [ARGS...]]
   ai-sandbox warm [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME]
   ai-sandbox exec [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] -- COMMAND [ARGS...]
   ai-sandbox install [WORKSPACE] [--force] [--only all|codex|vscode]
@@ -30,12 +30,132 @@ Usage:
   ai-sandbox open-url URL
   ai-sandbox open-in-editor FILE [LINE] [COLUMN]
   ai-sandbox repair-nix
+  ai-sandbox agents pull|push [--file PATH] [--force]
+  ai-sandbox skills pull|push [--dir PATH] [--force]
   ai-sandbox build-base
   ai-sandbox rebuild
   ai-sandbox reset-storage
   ai-sandbox reset-volumes  # alias for reset-storage
   ai-sandbox help
 EOF
+}
+
+require_absolute_home_storage() {
+  if [[ "$HOME_STORAGE" != /* ]]; then
+    echo "This command requires AI_SANDBOX_HOME_STORAGE to be an absolute host path." >&2
+    echo "Current HOME storage is not a host path: $HOME_STORAGE" >&2
+    exit 1
+  fi
+}
+
+ensure_host_codex_home() {
+  local host_codex_home="$1"
+  mkdir -p "$host_codex_home/skills"
+}
+
+copy_file_with_guard() {
+  local src="$1"
+  local dst="$2"
+  local force="$3"
+
+  if [[ -e "$dst" && "$force" -ne 1 ]]; then
+    echo "Refusing to overwrite existing file without --force: $dst" >&2
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "$dst")"
+  cp -f "$src" "$dst"
+}
+
+copy_dir_with_guard() {
+  local src="$1"
+  local dst="$2"
+  local force="$3"
+
+  if [[ -e "$dst" && "$force" -ne 1 ]]; then
+    echo "Refusing to overwrite existing directory without --force: $dst" >&2
+    exit 1
+  fi
+
+  if [[ -e "$dst" ]]; then
+    rm -rf "$dst"
+  fi
+  mkdir -p "$dst"
+  cp -a "$src/." "$dst/"
+}
+
+run_agents_sync() {
+  local sync_mode="$1"
+  local path_arg="$2"
+  local host_codex_home host_agents default_path
+
+  require_absolute_home_storage
+  host_codex_home="$HOME_STORAGE/.codex"
+  host_agents="$host_codex_home/AGENTS.md"
+  ensure_host_codex_home "$host_codex_home"
+  default_path="$PWD/AGENTS.md"
+
+  if [[ -n "$path_arg" ]]; then
+    if [[ "$path_arg" == /* ]]; then
+      default_path="$path_arg"
+    else
+      default_path="$(realpath -m "$path_arg")"
+    fi
+  fi
+
+  case "$sync_mode" in
+    pull)
+      [[ -f "$host_agents" ]] || { echo "No global AGENTS file found at: $host_agents" >&2; exit 1; }
+      copy_file_with_guard "$host_agents" "$default_path" "$install_force"
+      echo "Pulled global AGENTS from $host_agents to $default_path"
+      ;;
+    push)
+      [[ -f "$default_path" ]] || { echo "Source AGENTS file not found: $default_path" >&2; exit 1; }
+      copy_file_with_guard "$default_path" "$host_agents" "$install_force"
+      echo "Pushed AGENTS from $default_path to global path $host_agents"
+      ;;
+    *)
+      echo "Invalid agents mode: $sync_mode (expected pull|push)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+run_skills_sync() {
+  local sync_mode="$1"
+  local path_arg="$2"
+  local host_codex_home host_skills default_dir
+
+  require_absolute_home_storage
+  host_codex_home="$HOME_STORAGE/.codex"
+  host_skills="$host_codex_home/skills"
+  ensure_host_codex_home "$host_codex_home"
+  default_dir="$PWD/skills"
+
+  if [[ -n "$path_arg" ]]; then
+    if [[ "$path_arg" == /* ]]; then
+      default_dir="$path_arg"
+    else
+      default_dir="$(realpath -m "$path_arg")"
+    fi
+  fi
+
+  case "$sync_mode" in
+    pull)
+      [[ -d "$host_skills" ]] || { echo "No global skills directory found at: $host_skills" >&2; exit 1; }
+      copy_dir_with_guard "$host_skills" "$default_dir" "$install_force"
+      echo "Pulled global skills from $host_skills to $default_dir"
+      ;;
+    push)
+      [[ -d "$default_dir" ]] || { echo "Source skills directory not found: $default_dir" >&2; exit 1; }
+      copy_dir_with_guard "$default_dir" "$host_skills" "$install_force"
+      echo "Pushed skills from $default_dir to global path $host_skills"
+      ;;
+    *)
+      echo "Invalid skills mode: $sync_mode (expected pull|push)" >&2
+      exit 1
+      ;;
+  esac
 }
 
 ensure_image_exists() {
@@ -423,15 +543,18 @@ instance_arg=""
 follow_logs_on_start=0
 logs_follow=0
 exec_command=()
+shell_command=()
 workspace_explicit=0
 install_force=0
 install_only="all"
 auto_reconnect="${AI_SANDBOX_AUTO_RECONNECT:-1}"
 auto_reconnect_interval="${AI_SANDBOX_AUTO_RECONNECT_INTERVAL:-8}"
+sync_mode=""
+sync_path_arg=""
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    start|shell|warm|exec|install|build|logs|doctor-net|reconnect-network|build-base|rebuild|reset-storage|reset-volumes|repair-nix|open-url|open-in-editor|help|-h|--help)
+    start|shell|warm|exec|install|build|logs|doctor-net|reconnect-network|build-base|rebuild|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
       cmd="$1"
       shift
       ;;
@@ -443,20 +566,53 @@ fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    pull|push)
+      if [[ "$cmd" == "agents" || "$cmd" == "skills" ]]; then
+        [[ -z "$sync_mode" ]] || { echo "$cmd accepts exactly one mode: pull|push" >&2; exit 1; }
+        sync_mode="$1"
+        shift
+        continue
+      fi
+      ;;
     --)
       shift
       if [[ "$cmd" == "exec" ]]; then
         exec_command=("$@")
         break
+      elif [[ "$cmd" == "shell" ]]; then
+        shell_command=("$@")
+        break
       fi
       ;;
     --force)
-      if [[ "$cmd" == "install" || "$cmd" == "build" ]]; then
+      if [[ "$cmd" == "install" || "$cmd" == "build" || "$cmd" == "agents" || "$cmd" == "skills" ]]; then
         install_force=1
         shift
         continue
       fi
-      echo "--force is only valid with install/build" >&2
+      echo "--force is only valid with install/build/agents/skills" >&2
+      exit 1
+      ;;
+    --file)
+      if [[ "$cmd" == "agents" ]]; then
+        shift
+        [[ $# -gt 0 ]] || { echo "--file requires a path" >&2; exit 1; }
+        sync_path_arg="$1"
+        shift
+        continue
+      fi
+      echo "--file is only valid with agents" >&2
+      exit 1
+      ;;
+    --dir)
+      if [[ "$cmd" == "skills" ]]; then
+        shift
+        [[ $# -gt 0 ]] || { echo "--dir requires a path" >&2; exit 1; }
+        sync_path_arg="$1"
+        shift
+        continue
+      fi
+      echo "--dir is only valid with skills" >&2
       exit 1
       ;;
     --only)
@@ -519,6 +675,15 @@ while [[ $# -gt 0 ]]; do
           continue
         fi
         exec_command=("$@")
+        break
+      elif [[ "$cmd" == "shell" ]]; then
+        if [[ "$workspace_explicit" -eq 0 && -d "$1" ]]; then
+          workspace="$(realpath "$1")"
+          workspace_explicit=1
+          shift
+          continue
+        fi
+        shell_command=("$@")
         break
       elif [[ "$cmd" == "open-url" && -z "$open_url_arg" ]]; then
         open_url_arg="$1"
@@ -734,6 +899,16 @@ case "$cmd" in
       -v "$nix_mount_spec" \
       "$IMAGE"
     ;;
+  agents)
+    [[ -n "$sync_mode" ]] || { echo "agents requires pull or push" >&2; exit 1; }
+    run_agents_sync "$sync_mode" "$sync_path_arg"
+    exit 0
+    ;;
+  skills)
+    [[ -n "$sync_mode" ]] || { echo "skills requires pull or push" >&2; exit 1; }
+    run_skills_sync "$sync_mode" "$sync_path_arg"
+    exit 0
+    ;;
   open-url)
     [[ -n "$open_url_arg" ]] || { echo "open-url requires a URL" >&2; exit 1; }
     container="$(pick_running_container)"
@@ -909,6 +1084,7 @@ common_args=(
   --label "ai-sandbox.workspace-hash=$workspace_hash"
   --label "ai-sandbox.instance=$instance_arg"
   -e HOME=/sandbox-home
+  -e CODEX_HOME=/sandbox-home/.codex
   -e XDG_RUNTIME_DIR=/tmp/xdg-runtime
   -e "AI_SANDBOX_MODE=$cmd"
   -e "AI_SANDBOX_FLAKE=$flake_arg_container"
@@ -957,6 +1133,16 @@ run_detached() {
 
 run_interactive() {
   echo "Starting interactive sandbox container $container_name..."
+  if [[ "$cmd" == "shell" && ${#shell_command[@]} -gt 0 ]]; then
+    echo "Running shell command in sandbox: ${shell_command[*]}"
+    podman run --rm -it \
+      "${common_args[@]}" \
+      "${network_args[@]}" \
+      "${host_dbus_args[@]}" \
+      "$IMAGE" "${shell_command[@]}"
+    return
+  fi
+
   podman run --rm -it \
     "${common_args[@]}" \
     "${network_args[@]}" \

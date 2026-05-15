@@ -2,11 +2,18 @@
 
 ## Priority order (highest first)
 1. Correctness and requested scope
-2. Simplicity and explicit flow
-3. Functional style and composition
-4. Lightweight quality checks
+2. Root-cause and upstream-first fixes
+3. Simplicity and explicit flow
+4. Functional style and composition
+5. Lightweight quality checks
 
 If rules conflict, follow the higher-priority rule and state the tradeoff briefly.
+
+## Root-cause policy (upstream first)
+- Always trace bugs or change requests to the highest upstream source in the codebase and fix it there first.
+- Do not patch symptoms at lower layers when the true source can be fixed upstream.
+- Treat local workarounds as last resort only: if unavoidable, explain why upstream resolution is not feasible and document residual risk.
+- Before adding a fix, inspect call flow and ownership boundaries to avoid solving the same problem multiple times in different layers.
 
 ## Coding principles
 - Use functional style where practical: avoid hidden side effects, avoid global state, pass dependencies as function arguments, and prefer composition over inheritance.
