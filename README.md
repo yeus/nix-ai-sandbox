@@ -95,10 +95,20 @@ ai-sandbox install . --only codex
 ai-sandbox install . --only vscode
 ```
 
+Inside sandbox terminals, `apt-get` and `apt` are available directly. They are
+wrapped to run with root privileges for package-management commands.
+
 Rebuild the base image from scratch (remove old image tag first, keep storage dirs):
 
 ```bash
 ai-sandbox rebuild
+```
+
+Remove persistent sandbox containers (keep home/nix storage):
+
+```bash
+ai-sandbox reset-container .
+ai-sandbox reset-container --all
 ```
 
 Reset sandbox storage (clear `~/.cache/ai-sandbox/nix` and `~/.cache/ai-sandbox/home` by default):
@@ -118,8 +128,13 @@ Sync global Codex instructions (sandbox-wide, not project-local):
 ```bash
 ai-sandbox agents pull
 ai-sandbox agents push
+ai-sandbox agents reset
+ai-sandbox agents clear
 ai-sandbox agents pull --file ./AGENTS.md --force
 ```
+
+Inside sandbox terminals, `ai-sandbox` is available as an alias to
+`/workspace/ai-sandbox/ai-sandbox`, so these `agents` commands can be run there too.
 
 Sync global Codex skills:
 
@@ -165,6 +180,9 @@ Open an interactive shell in the sandbox:
 ```bash
 ai-sandbox shell .
 ```
+
+By default, `start`, `shell`, and `exec` now reuse persistent per-workspace containers
+(`instance=default`) instead of always using disposable `--rm` containers.
 
 Run a command directly in shell mode (flake-aware):
 
@@ -521,11 +539,16 @@ alias sandbox-warm='ai-sandbox warm .'
 If your flake is elsewhere:
 
 ```bash
-export AI_SANDBOX_FLAKE_OVERRIDE="../nix/flake.nix"
-alias sandbox-start='ai-sandbox start . --flake "$AI_SANDBOX_FLAKE_OVERRIDE"'
-alias sandbox-shell='ai-sandbox shell . --flake "$AI_SANDBOX_FLAKE_OVERRIDE"'
-alias sandbox-warm='ai-sandbox warm . --flake "$AI_SANDBOX_FLAKE_OVERRIDE"'
+use flake ./packaging/nix
+
+alias sandbox-start='ai-sandbox start .'
+alias sandbox-shell='ai-sandbox shell .'
+alias sandbox-warm='ai-sandbox warm .'
 ```
+
+`ai-sandbox` also detects flake overrides from `.envrc` before startup:
+- `use flake ./path/to/flake-root`
+- `export AI_SANDBOX_FLAKE_OVERRIDE=./path/to/flake.nix`
 
 Then run:
 
@@ -547,6 +570,7 @@ sandbox-start
 * The shared bind-mounted storage makes repeated launches much faster after the first warmup.
 * Storage defaults to `~/.cache/ai-sandbox/{home,nix}` and is directly manageable as your user on the host.
 * `ai-sandbox start`, `shell`, and `warm` auto-register a host URL handler for `vscode://` and `vscode-insiders://` so OAuth callbacks (for example GitHub login) route back into the running sandbox container.
+* Security note: sandbox image grants passwordless `sudo` for `apt/apt-get/dpkg` to support in-sandbox package installs.
 
 ## Security model
 

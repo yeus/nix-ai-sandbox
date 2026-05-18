@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     dbus-x11 \
+    direnv \
     fd-find \
     file \
     git \
@@ -42,6 +43,26 @@ RUN apt-get update && apt-get install -y \
     xz-utils \
     zip \
     && rm -rf /var/lib/apt/lists/*
+
+RUN printf '%s\n' \
+    'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+    'ALL ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg' \
+    > /etc/sudoers.d/90-ai-sandbox-apt \
+    && chmod 0440 /etc/sudoers.d/90-ai-sandbox-apt
+
+RUN cat >/usr/local/bin/apt-get <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/bin/sudo -n /usr/bin/apt-get "$@"
+EOF
+RUN chmod 0755 /usr/local/bin/apt-get
+
+RUN cat >/usr/local/bin/apt <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/bin/sudo -n /usr/bin/apt "$@"
+EOF
+RUN chmod 0755 /usr/local/bin/apt
 
 RUN curl -fsSL https://starship.rs/install.sh | sh -s -- --yes
 RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd

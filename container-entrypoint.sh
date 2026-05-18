@@ -130,6 +130,32 @@ ensure_default_user_software() {
   echo "AI_SANDBOX: default user-space software is ready."
 }
 
+ensure_ai_sandbox_cli_shim() {
+  local shim
+  shim="$HOME/.local/bin/ai-sandbox"
+
+  cat >"$shim" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+for candidate in \
+  "/workspace/ai-sandbox/ai-sandbox" \
+  "/workspace/modules/ai-sandbox/ai-sandbox"
+do
+  if [[ -x "$candidate" ]]; then
+    exec "$candidate" "$@"
+  fi
+done
+
+echo "ai-sandbox CLI script not found in mounted workspace." >&2
+echo "Expected one of:" >&2
+echo "  /workspace/ai-sandbox/ai-sandbox" >&2
+echo "  /workspace/modules/ai-sandbox/ai-sandbox" >&2
+exit 127
+EOF
+  chmod 0755 "$shim"
+}
+
 seed_nix_if_needed() {
   local candidate seed_marker lock_file lock_fd
   seed_marker="/nix/.ai-sandbox-seed-v2.done"
@@ -338,6 +364,9 @@ EOF
   cat > "$HOME/.ai-sandbox-bashrc" <<'EOF'
 [ -f /etc/bash.bashrc ] && . /etc/bash.bashrc
 
+export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}"
+export PATH="$HOME/.local/bin:$NPM_CONFIG_PREFIX/bin:$HOME/.local/opt/vscode/bin:$PATH"
+
 # Keep shell startup deterministic by default.
 # User bashrc hooks can be re-enabled explicitly when needed.
 if [[ "${AI_SANDBOX_SOURCE_USER_BASHRC:-0}" == "1" ]] && [ -f "$HOME/.bashrc" ]; then
@@ -347,6 +376,14 @@ fi
 if [[ -n "${AI_SANDBOX_SHELL_STARTED_FILE:-}" ]]; then
   : > "$AI_SANDBOX_SHELL_STARTED_FILE"
   unset AI_SANDBOX_SHELL_STARTED_FILE
+fi
+
+if command -v direnv >/dev/null 2>&1; then
+  eval "$(direnv hook bash)"
+fi
+
+if [[ -x /workspace/ai-sandbox/ai-sandbox ]]; then
+  alias ai-sandbox='/workspace/ai-sandbox/ai-sandbox'
 fi
 
 export HISTFILE="$HOME/.bash_eternal_history"
@@ -405,6 +442,7 @@ repair_nix_command_symlinks
 link_shared_vscode_user_files
 ensure_default_vscode_settings
 ensure_ai_shell_prompt_files
+ensure_ai_sandbox_cli_shim
 ensure_codex_default_instructions
 ensure_codex_global_writable_root
 
@@ -421,6 +459,8 @@ export AI_SANDBOX_NIX_AVAILABLE
 export BROWSER=/usr/local/bin/ai-sandbox-xdg-open
 
 resolve_flake_target() {
+  local discovered_envrc_flake
+
   if [[ -n "$flake_input" ]]; then
     if [[ -d "$flake_input" ]]; then
       echo "$flake_input"
@@ -434,12 +474,82 @@ resolve_flake_target() {
     exit 1
   fi
 
+  discovered_envrc_flake="$(discover_flake_from_envrc)"
+  if [[ -n "$discovered_envrc_flake" ]]; then
+    echo "$discovered_envrc_flake"
+    return
+  fi
+
   if [[ -f "$workspace/flake.nix" ]]; then
     echo "$workspace"
     return
   fi
 
   echo ""
+}
+
+discover_flake_from_envrc() {
+  local envrc line resolved candidate path_candidate
+  envrc="$workspace/.envrc"
+  [[ -f "$envrc" ]] || return 0
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^[[:space:]]*use[[:space:]]+flake([[:space:]]+([^[:space:]#]+))?[[:space:]]*(#.*)?$ ]]; then
+      candidate="${BASH_REMATCH[2]:-}"
+      if [[ -z "$candidate" ]]; then
+        echo "$workspace"
+        return 0
+      fi
+
+      path_candidate="$candidate"
+      path_candidate="${path_candidate#\"}"
+      path_candidate="${path_candidate%\"}"
+      path_candidate="${path_candidate#\'}"
+      path_candidate="${path_candidate%\'}"
+      path_candidate="${path_candidate%%\#*}"
+      [[ -n "$path_candidate" ]] || path_candidate="."
+
+      if [[ "$path_candidate" == /* ]]; then
+        resolved="$path_candidate"
+      else
+        resolved="$(realpath -m "$workspace/$path_candidate")"
+      fi
+
+      if [[ -d "$resolved" ]]; then
+        echo "$resolved"
+        return 0
+      fi
+      if [[ -f "$resolved" ]]; then
+        dirname "$resolved"
+        return 0
+      fi
+    fi
+
+    if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+AI_SANDBOX_FLAKE_OVERRIDE=([^[:space:]#]+)[[:space:]]*(#.*)?$ ]]; then
+      candidate="${BASH_REMATCH[1]}"
+      candidate="${candidate#\"}"
+      candidate="${candidate%\"}"
+      candidate="${candidate#\'}"
+      candidate="${candidate%\'}"
+
+      if [[ "$candidate" == /* ]]; then
+        resolved="$candidate"
+      else
+        resolved="$(realpath -m "$workspace/$candidate")"
+      fi
+
+      if [[ -d "$resolved" ]]; then
+        echo "$resolved"
+        return 0
+      fi
+      if [[ -f "$resolved" ]]; then
+        dirname "$resolved"
+        return 0
+      fi
+    fi
+  done <"$envrc"
+
+  return 0
 }
 
 flake_target=""

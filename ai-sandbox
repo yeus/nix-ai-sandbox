@@ -4,7 +4,8 @@ set -euo pipefail
 IMAGE="${AI_SANDBOX_IMAGE:-ai-sandbox-vscode}"
 HOME_STORAGE="${AI_SANDBOX_HOME_STORAGE:-${AI_SANDBOX_HOME_VOLUME:-$HOME/.cache/ai-sandbox/home}}"
 NIX_STORAGE="${AI_SANDBOX_NIX_STORAGE:-${AI_SANDBOX_NIX_VOLUME:-$HOME/.cache/ai-sandbox/nix}}"
-BUILD_CONTEXT="${AI_SANDBOX_BUILD_CONTEXT:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_CONTEXT="${AI_SANDBOX_BUILD_CONTEXT:-$SCRIPT_DIR}"
 STATE_DIR="${AI_SANDBOX_STATE_DIR:-$HOME/.local/state/ai-sandbox}"
 NETWORK_MODE="${AI_SANDBOX_NETWORK_MODE:-host}"
 
@@ -31,9 +32,11 @@ Usage:
   ai-sandbox open-in-editor FILE [LINE] [COLUMN]
   ai-sandbox repair-nix
   ai-sandbox agents pull|push [--file PATH] [--force]
+  ai-sandbox agents reset|clear
   ai-sandbox skills pull|push [--dir PATH] [--force]
   ai-sandbox build-base
   ai-sandbox rebuild
+  ai-sandbox reset-container [WORKSPACE] [--all]
   ai-sandbox reset-storage
   ai-sandbox reset-volumes  # alias for reset-storage
   ai-sandbox help
@@ -87,11 +90,13 @@ copy_dir_with_guard() {
 run_agents_sync() {
   local sync_mode="$1"
   local path_arg="$2"
-  local host_codex_home host_agents default_path
+  local host_codex_home host_agents default_path disable_seed default_agents
 
   require_absolute_home_storage
   host_codex_home="$HOME_STORAGE/.codex"
   host_agents="$host_codex_home/AGENTS.md"
+  disable_seed="$host_codex_home/.disable_default_agents_seed"
+  default_agents="$BUILD_CONTEXT/AGENTS.md"
   ensure_host_codex_home "$host_codex_home"
   default_path="$PWD/AGENTS.md"
 
@@ -114,8 +119,19 @@ run_agents_sync() {
       copy_file_with_guard "$default_path" "$host_agents" "$install_force"
       echo "Pushed AGENTS from $default_path to global path $host_agents"
       ;;
+    reset)
+      [[ -f "$default_agents" ]] || { echo "Default AGENTS template not found: $default_agents" >&2; exit 1; }
+      copy_file_with_guard "$default_agents" "$host_agents" 1
+      rm -f "$disable_seed"
+      echo "Reset global AGENTS to default template at $host_agents"
+      ;;
+    clear)
+      rm -f "$host_agents" "$host_codex_home/AGENTS.override.md" "$disable_seed"
+      echo "Cleared global AGENTS overrides from $host_codex_home"
+      echo "Default AGENTS will be seeded again on next container startup."
+      ;;
     *)
-      echo "Invalid agents mode: $sync_mode (expected pull|push)" >&2
+      echo "Invalid agents mode: $sync_mode (expected pull|push|reset|clear)" >&2
       exit 1
       ;;
   esac
@@ -262,6 +278,16 @@ pick_running_container_for_workspace() {
     --filter label=ai-sandbox=true \
     --filter "label=ai-sandbox.workspace=$workspace_path" \
     --format '{{.Names}}' | head -n1
+}
+
+container_workspace_from_env() {
+  local container="$1"
+  local env_dump existing_workspace
+
+  env_dump="$(podman inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null || true)"
+  existing_workspace="$(printf '%s\n' "$env_dump" | sed -n 's/^AI_SANDBOX_WORKSPACE=//p' | head -n1)"
+  [[ -n "$existing_workspace" ]] || existing_workspace="/workspace"
+  printf '%s\n' "$existing_workspace"
 }
 
 pick_running_container_for_file() {
@@ -551,10 +577,11 @@ auto_reconnect="${AI_SANDBOX_AUTO_RECONNECT:-1}"
 auto_reconnect_interval="${AI_SANDBOX_AUTO_RECONNECT_INTERVAL:-8}"
 sync_mode=""
 sync_path_arg=""
+reset_all_containers=0
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    start|shell|warm|exec|install|build|logs|doctor-net|reconnect-network|build-base|rebuild|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
+    start|shell|warm|exec|install|build|logs|doctor-net|reconnect-network|build-base|rebuild|reset-container|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
       cmd="$1"
       shift
       ;;
@@ -566,9 +593,13 @@ fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    pull|push)
+    pull|push|reset|clear)
       if [[ "$cmd" == "agents" || "$cmd" == "skills" ]]; then
-        [[ -z "$sync_mode" ]] || { echo "$cmd accepts exactly one mode: pull|push" >&2; exit 1; }
+        [[ -z "$sync_mode" ]] || { echo "$cmd accepts exactly one mode" >&2; exit 1; }
+        if [[ "$cmd" == "skills" && ( "$1" == "reset" || "$1" == "clear" ) ]]; then
+          echo "skills accepts pull|push only" >&2
+          exit 1
+        fi
         sync_mode="$1"
         shift
         continue
@@ -647,6 +678,15 @@ while [[ $# -gt 0 ]]; do
     --logs)
       follow_logs_on_start=1
       shift
+      ;;
+    --all)
+      if [[ "$cmd" == "reset-container" ]]; then
+        reset_all_containers=1
+        shift
+        continue
+      fi
+      echo "--all is only valid with reset-container" >&2
+      exit 1
       ;;
     --auto-reconnect)
       auto_reconnect=1
@@ -843,6 +883,22 @@ case "$cmd" in
     reconnect_container_network "$target_container" "manual"
     exit $?
     ;;
+  reset-container)
+    if [[ "$reset_all_containers" -eq 1 ]]; then
+      mapfile -t sandbox_containers < <(podman ps -a --filter label=ai-sandbox=true --format '{{.Names}}')
+    else
+      workspace="$(realpath "$workspace")"
+      mapfile -t sandbox_containers < <(podman ps -a --filter "label=ai-sandbox.workspace=$workspace" --format '{{.Names}}')
+    fi
+
+    if [[ ${#sandbox_containers[@]} -gt 0 ]]; then
+      podman rm -f "${sandbox_containers[@]}" >/dev/null
+      echo "Removed containers: ${sandbox_containers[*]}"
+    else
+      echo "No matching sandbox containers to remove."
+    fi
+    exit 0
+    ;;
   reset-storage|reset-volumes)
     # Stop/remove running AI sandbox containers first so storage can be removed.
     mapfile -t sandbox_containers < <(podman ps -aq --filter label=ai-sandbox=true)
@@ -900,7 +956,7 @@ case "$cmd" in
       "$IMAGE"
     ;;
   agents)
-    [[ -n "$sync_mode" ]] || { echo "agents requires pull or push" >&2; exit 1; }
+    [[ -n "$sync_mode" ]] || { echo "agents requires pull, push, reset, or clear" >&2; exit 1; }
     run_agents_sync "$sync_mode" "$sync_path_arg"
     exit 0
     ;;
@@ -1027,9 +1083,8 @@ base_container_name="ai-sandbox-${project_slug}-${launch_context}-${workspace_ha
 if [[ -n "$instance_arg" ]]; then
   container_name="$base_container_name-$instance_arg"
 else
-  auto_instance="$(pick_auto_instance_name "$base_container_name")"
-  container_name="$base_container_name-$auto_instance"
-  instance_arg="$auto_instance"
+  instance_arg="default"
+  container_name="$base_container_name-$instance_arg"
 fi
 
 echo "$container_name" > "$STATE_DIR/last-container"
@@ -1110,14 +1165,24 @@ if [[ "$NETWORK_MODE" == "host" ]]; then
 fi
 
 run_detached() {
-  local mode
-  echo "Starting sandbox container $container_name..."
-  podman run --rm -d \
-    "${common_args[@]}" \
-    "${network_args[@]}" \
-    "${host_dbus_args[@]}" \
-    "$IMAGE" >/dev/null
-  echo "Started $container_name"
+  local mode existing_state
+  existing_state="$(podman inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
+
+  if [[ "$existing_state" == "running" ]]; then
+    echo "Sandbox container already running: $container_name"
+  elif [[ -n "$existing_state" ]]; then
+    echo "Starting existing sandbox container $container_name..."
+    podman start "$container_name" >/dev/null
+  else
+    echo "Starting sandbox container $container_name..."
+    podman run -d \
+      "${common_args[@]}" \
+      "${network_args[@]}" \
+      "${host_dbus_args[@]}" \
+      "$IMAGE" >/dev/null
+    echo "Started $container_name"
+  fi
+
   mode="$(container_network_mode "$container_name")"
   if [[ "$auto_reconnect" == "1" ]]; then
     maybe_start_auto_reconnect_watcher "$container_name" "$mode" "$auto_reconnect_interval"
@@ -1132,18 +1197,51 @@ run_detached() {
 }
 
 run_interactive() {
-  echo "Starting interactive sandbox container $container_name..."
-  if [[ "$cmd" == "shell" && ${#shell_command[@]} -gt 0 ]]; then
-    echo "Running shell command in sandbox: ${shell_command[*]}"
+  local existing_state
+
+  if [[ "$cmd" == "warm" ]]; then
+    echo "Starting warmup container..."
     podman run --rm -it \
       "${common_args[@]}" \
       "${network_args[@]}" \
       "${host_dbus_args[@]}" \
-      "$IMAGE" "${shell_command[@]}"
+      "$IMAGE"
     return
   fi
 
-  podman run --rm -it \
+  existing_state="$(podman inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
+  if [[ "$existing_state" == "running" ]]; then
+    echo "Reusing running sandbox container $container_name..."
+    if [[ ${#shell_command[@]} -gt 0 ]]; then
+      exec podman exec -it "$container_name" "${shell_command[@]}"
+    fi
+    exec podman exec -it "$container_name" /bin/bash --noprofile --rcfile /sandbox-home/.ai-sandbox-bashrc -i
+  fi
+
+  if [[ -n "$existing_state" ]]; then
+    if [[ ${#shell_command[@]} -gt 0 ]]; then
+      echo "Replacing stopped sandbox container to run shell command..."
+      podman rm "$container_name" >/dev/null
+      exec podman run -it \
+        "${common_args[@]}" \
+        "${network_args[@]}" \
+        "${host_dbus_args[@]}" \
+        "$IMAGE" "${shell_command[@]}"
+    fi
+    echo "Attaching to existing sandbox container $container_name..."
+    exec podman start -a -i "$container_name"
+  fi
+
+  echo "Starting interactive sandbox container $container_name..."
+  if [[ ${#shell_command[@]} -gt 0 ]]; then
+    exec podman run -it \
+      "${common_args[@]}" \
+      "${network_args[@]}" \
+      "${host_dbus_args[@]}" \
+      "$IMAGE" "${shell_command[@]}"
+  fi
+
+  exec podman run -it \
     "${common_args[@]}" \
     "${network_args[@]}" \
     "${host_dbus_args[@]}" \
@@ -1151,7 +1249,7 @@ run_interactive() {
 }
 
 run_exec() {
-  local existing_container existing_workspace env_dump
+  local existing_container existing_workspace existing_state
 
   existing_container="$(pick_running_container_for_workspace "$workspace" || true)"
   if [[ -n "$existing_container" ]]; then
@@ -1159,20 +1257,26 @@ run_exec() {
     if [[ "$auto_reconnect" == "1" ]]; then
       reconnect_container_network "$existing_container" "pre-exec" || true
     fi
-    env_dump="$(podman inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$existing_container" 2>/dev/null || true)"
-    existing_workspace="$(printf '%s\n' "$env_dump" | sed -n 's/^AI_SANDBOX_WORKSPACE=//p' | head -n1)"
-    [[ -n "$existing_workspace" ]] || existing_workspace="/workspace"
+    existing_workspace="$(container_workspace_from_env "$existing_container")"
     echo "Running command in sandbox workspace $existing_workspace: ${exec_command[*]}"
     exec podman exec -it "$existing_container" /bin/bash -lc 'cd "$1"; shift; exec "$@"' _ "$existing_workspace" "${exec_command[@]}"
   fi
 
-  echo "No running sandbox found for workspace; starting temporary container..."
+  existing_state="$(podman inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
+  if [[ -n "$existing_state" && "$existing_state" != "running" ]]; then
+    echo "Starting existing sandbox container $container_name for exec..."
+    podman start "$container_name" >/dev/null
+  elif [[ -z "$existing_state" ]]; then
+    echo "No sandbox container found for workspace; creating persistent container..."
+    podman run -d \
+      "${common_args[@]}" \
+      "${network_args[@]}" \
+      "${host_dbus_args[@]}" \
+      "$IMAGE" >/dev/null
+  fi
+
   echo "Running command: ${exec_command[*]}"
-  exec podman run --rm -it \
-    "${common_args[@]}" \
-    "${network_args[@]}" \
-    "${host_dbus_args[@]}" \
-    "$IMAGE" "${exec_command[@]}"
+  exec podman exec -it "$container_name" /bin/bash -lc 'cd "$1"; shift; exec "$@"' _ "$container_workspace" "${exec_command[@]}"
 }
 
 run_install() {

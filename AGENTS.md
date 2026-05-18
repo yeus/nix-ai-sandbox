@@ -9,6 +9,23 @@
 
 If rules conflict, follow the higher-priority rule and state the tradeoff briefly.
 
+## Sandbox capabilities (what the AI can do here)
+- You are running inside an AI sandbox container, not on the host system.
+- The AI can edit files in the mounted workspace and run CLI tools in the sandbox terminal.
+- The AI can install system packages from inside the sandbox terminal using `apt`/`apt-get`
+  (passwordless sudo wrapper is available for `apt`, `apt-get`, and `dpkg` in this image).
+- The AI can modify global Codex instructions at:
+  `/sandbox-home/.codex/AGENTS.md`
+- The AI can sync/reset global instructions with `ai-sandbox` commands from host side:
+  - `ai-sandbox agents pull|push`
+  - `ai-sandbox agents reset` (overwrite global custom AGENTS with default template)
+  - `ai-sandbox agents clear` (remove global custom AGENTS/override so default re-seeds)
+- Inside this sandbox terminal, `ai-sandbox` is available as a command alias to
+  `/workspace/ai-sandbox/ai-sandbox`, so the AI can run `ai-sandbox agents reset|clear`
+  directly from within the sandbox.
+- Project-local `AGENTS.md` and global `~/.codex/AGENTS.md` are different layers; do not
+  confuse them when applying instruction changes.
+
 ## Root-cause policy (upstream first)
 - Always trace bugs or change requests to the highest upstream source in the codebase and fix it there first.
 - Do not patch symptoms at lower layers when the true source can be fixed upstream.
@@ -31,6 +48,9 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 - we are in a sandbox here, so the user can not copy long, single-line cli commands
   without linebreaks.  You need to explicitly add line breaks and '\' and make sure,
   a command never exceeds 50 chars width. Number of lines doesn't matter...
+- inside this ai-sandbox image, `apt`, `apt-get`, and `dpkg` are allowed via passwordless
+  sudo wrapper. If system packages are missing, you may install them directly from inside
+  the sandbox terminal.
 
 ## Scope and minimalism
 - Stay minimal: implement only what was requested.
