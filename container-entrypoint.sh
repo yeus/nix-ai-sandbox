@@ -382,7 +382,26 @@ EOF
 [ -f /etc/bash.bashrc ] && . /etc/bash.bashrc
 
 export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}"
-export PATH="$HOME/.local/bin:$NPM_CONFIG_PREFIX/bin:$HOME/.local/opt/vscode/bin:$PATH"
+__ai_sandbox_prepend_path_once() {
+  local p="$1"
+  [[ -n "$p" ]] || return 0
+  [[ -d "$p" ]] || return 0
+  case ":$PATH:" in
+    *":$p:"*) ;;
+    *) PATH="$p:$PATH" ;;
+  esac
+}
+
+__ai_sandbox_refresh_user_paths() {
+  __ai_sandbox_prepend_path_once "$HOME/.local/bin"
+  __ai_sandbox_prepend_path_once "$NPM_CONFIG_PREFIX/bin"
+  __ai_sandbox_prepend_path_once "$HOME/.local/opt/vscode/bin"
+  __ai_sandbox_prepend_path_once "$HOME/.cargo/bin"
+  __ai_sandbox_prepend_path_once "$HOME/.pnpm"
+}
+
+__ai_sandbox_refresh_user_paths
+export PATH
 
 # Keep shell startup deterministic by default.
 # User bashrc hooks can be re-enabled explicitly when needed.
