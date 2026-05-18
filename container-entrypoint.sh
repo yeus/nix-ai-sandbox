@@ -130,6 +130,23 @@ ensure_default_user_software() {
   echo "AI_SANDBOX: default user-space software is ready."
 }
 
+ensure_codex_cli_shim() {
+  local shim
+  shim="$HOME/.local/bin/codex"
+
+  cat >"$shim" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -x "$HOME/.npm-global/bin/codex" ]]; then
+  exec "$HOME/.npm-global/bin/codex" "$@"
+fi
+
+exec npx -y @openai/codex@latest "$@"
+EOF
+  chmod 0755 "$shim"
+}
+
 ensure_ai_sandbox_cli_shim() {
   local shim
   shim="$HOME/.local/bin/ai-sandbox"
@@ -443,6 +460,7 @@ link_shared_vscode_user_files
 ensure_default_vscode_settings
 ensure_ai_shell_prompt_files
 ensure_ai_sandbox_cli_shim
+ensure_codex_cli_shim
 ensure_codex_default_instructions
 ensure_codex_global_writable_root
 
