@@ -1083,7 +1083,11 @@ base_container_name="ai-sandbox-${project_slug}-${launch_context}-${workspace_ha
 if [[ -n "$instance_arg" ]]; then
   container_name="$base_container_name-$instance_arg"
 else
-  instance_arg="default"
+  if [[ "$cmd" == "shell" ]]; then
+    instance_arg="$(pick_auto_instance_name "$base_container_name")"
+  else
+    instance_arg="default"
+  fi
   container_name="$base_container_name-$instance_arg"
 fi
 
@@ -1197,8 +1201,6 @@ run_detached() {
 }
 
 run_interactive() {
-  local existing_state
-
   if [[ "$cmd" == "warm" ]]; then
     echo "Starting warmup container..."
     podman run --rm -it \
@@ -1206,42 +1208,20 @@ run_interactive() {
       "${network_args[@]}" \
       "${host_dbus_args[@]}" \
       "$IMAGE"
-    return
   fi
+}
 
-  existing_state="$(podman inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
-  if [[ "$existing_state" == "running" ]]; then
-    echo "Reusing running sandbox container $container_name..."
-    if [[ ${#shell_command[@]} -gt 0 ]]; then
-      exec podman exec -it "$container_name" "${shell_command[@]}"
-    fi
-    exec podman exec -it "$container_name" /bin/bash --noprofile --rcfile /sandbox-home/.ai-sandbox-bashrc -i
-  fi
-
-  if [[ -n "$existing_state" ]]; then
-    if [[ ${#shell_command[@]} -gt 0 ]]; then
-      echo "Replacing stopped sandbox container to run shell command..."
-      podman rm "$container_name" >/dev/null
-      exec podman run -it \
-        "${common_args[@]}" \
-        "${network_args[@]}" \
-        "${host_dbus_args[@]}" \
-        "$IMAGE" "${shell_command[@]}"
-    fi
-    echo "Attaching to existing sandbox container $container_name..."
-    exec podman start -a -i "$container_name"
-  fi
-
-  echo "Starting interactive sandbox container $container_name..."
+run_shell() {
+  echo "Starting fresh sandbox container $container_name..."
   if [[ ${#shell_command[@]} -gt 0 ]]; then
-    exec podman run -it \
+    exec podman run --rm -it \
       "${common_args[@]}" \
       "${network_args[@]}" \
       "${host_dbus_args[@]}" \
       "$IMAGE" "${shell_command[@]}"
   fi
 
-  exec podman run -it \
+  exec podman run --rm -it \
     "${common_args[@]}" \
     "${network_args[@]}" \
     "${host_dbus_args[@]}" \
@@ -1338,7 +1318,8 @@ run_install() {
 
 case "$cmd" in
   start) run_detached ;;
-  shell|warm) run_interactive ;;
+  shell) run_shell ;;
+  warm) run_interactive ;;
   exec) run_exec ;;
   install) run_install ;;
   *) usage >&2; exit 1 ;;

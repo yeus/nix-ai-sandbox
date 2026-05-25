@@ -181,8 +181,9 @@ Open an interactive shell in the sandbox:
 ai-sandbox shell .
 ```
 
-By default, `start`, `shell`, and `exec` now reuse persistent per-workspace containers
+By default, `start` and `exec` reuse persistent per-workspace containers
 (`instance=default`) instead of always using disposable `--rm` containers.
+`shell` starts a fresh disposable container each time so interactive sessions stay isolated.
 
 Run a command directly in shell mode (flake-aware):
 
