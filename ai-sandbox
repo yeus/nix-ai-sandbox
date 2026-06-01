@@ -20,26 +20,67 @@ usage() {
   cat <<'EOF'
 Usage:
   ai-sandbox [start] [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--logs] [--auto-reconnect|--no-auto-reconnect] [--auto-reconnect-interval SECONDS]
+    Start (or attach to) the sandbox for a workspace and launch VS Code by default.
+
   ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [-- COMMAND [ARGS...]]
+    Start/attach the sandbox and open an interactive shell (or run command after --).
+
   ai-sandbox warm [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME]
+    Pre-start the sandbox container and dependencies without launching VS Code.
+
   ai-sandbox exec [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] -- COMMAND [ARGS...]
+    Run a command inside the sandbox container.
+
   ai-sandbox install [WORKSPACE] [--force] [--only all|codex|vscode]
+    Install default tools/components inside the sandbox image/runtime.
+
   ai-sandbox build [WORKSPACE] [--force] [--only all|codex|vscode]
+    Build/update sandbox tool layers without starting an editor session.
+
   ai-sandbox logs [WORKSPACE] [-f|--follow]
+    Show sandbox container logs (optionally follow).
+
   ai-sandbox doctor-net [WORKSPACE]
+    Diagnose sandbox networking and connectivity assumptions.
+
   ai-sandbox reconnect-network [WORKSPACE]
+    Reconnect sandbox networking using the configured network mode.
+
   ai-sandbox open-url URL
+    Open a URL in VS Code running inside the sandbox (fallback to host editor).
+
   ai-sandbox open-in-editor FILE [LINE] [COLUMN]
+    Open a file position in sandbox VS Code.
+
   ai-sandbox repair-nix
+    Attempt targeted repair steps for broken Nix state in the sandbox.
+
   ai-sandbox agents pull|push [--file PATH] [--force]
+    Sync AGENTS.md between global Codex home and a project file.
+
   ai-sandbox agents reset|clear
+    Reset or clear global Codex AGENTS state in sandbox home storage.
+
   ai-sandbox skills pull|push [--dir PATH] [--force]
+    Sync global Codex skills directory with a project directory.
+
   ai-sandbox build-base
+    Rebuild only the base sandbox image.
+
   ai-sandbox rebuild
+    Rebuild sandbox image and refresh runtime state as needed.
+
   ai-sandbox reset-container [WORKSPACE] [--all]
+    Remove sandbox container(s) for the workspace (or all known instances).
+
   ai-sandbox reset-storage
-  ai-sandbox reset-volumes  # alias for reset-storage
+    Remove persisted home/nix storage for the sandbox.
+
+  ai-sandbox reset-volumes
+    Alias for reset-storage.
+
   ai-sandbox help
+    Show this help text.
 EOF
 }
 

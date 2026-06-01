@@ -11,6 +11,10 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 
 ## Sandbox capabilities (what the AI can do here)
 - You are running inside an AI sandbox container, not on the host system.
+- `/workspace` is the sandbox container's mount point and does not exist as the same
+  absolute path on the parent host. Do not assume `/workspace/...` is a valid host path.
+- Prefer relative paths for routine navigation, reads, and edits. Use absolute paths only
+  when a tool explicitly requires them or when disambiguation is necessary.
 - The AI can edit files in the mounted workspace and run CLI tools in the sandbox terminal.
 - The AI can install system packages from inside the sandbox terminal using `apt`/`apt-get`
   (passwordless sudo wrapper is available for `apt`, `apt-get`, and `dpkg` in this image).
