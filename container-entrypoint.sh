@@ -60,6 +60,27 @@ ensure_codex_default_instructions() {
   cp "$default_agents" "$target_agents"
 }
 
+ensure_opencode_default_instructions() {
+  local opencode_config_dir codex_agents opencode_agents
+  opencode_config_dir="$HOME/.config/opencode"
+  codex_agents="$CODEX_HOME/AGENTS.md"
+  opencode_agents="$opencode_config_dir/AGENTS.md"
+
+  mkdir -p "$opencode_config_dir"
+
+  if [[ -L "$opencode_agents" ]]; then
+    return
+  fi
+
+  if [[ -e "$opencode_agents" && ! -L "$opencode_agents" ]]; then
+    rm -f "$opencode_agents"
+  fi
+
+  if [[ -f "$codex_agents" ]]; then
+    ln -sf "$codex_agents" "$opencode_agents"
+  fi
+}
+
 ensure_codex_global_writable_root() {
   local codex_dir config_file root
   codex_dir="$CODEX_HOME"
@@ -143,6 +164,23 @@ if [[ -x "$HOME/.npm-global/bin/codex" ]]; then
 fi
 
 exec npx -y @openai/codex@latest "$@"
+EOF
+  chmod 0755 "$shim"
+}
+
+ensure_opencode_cli_shim() {
+  local shim
+  shim="$HOME/.local/bin/opencode"
+
+  cat >"$shim" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -x "$HOME/.npm-global/bin/opencode" ]]; then
+  exec "$HOME/.npm-global/bin/opencode" "$@"
+fi
+
+exec npx -y opencode-ai@latest "$@"
 EOF
   chmod 0755 "$shim"
 }
@@ -461,7 +499,9 @@ ensure_default_vscode_settings
 ensure_ai_shell_prompt_files
 ensure_ai_sandbox_cli_shim
 ensure_codex_cli_shim
+ensure_opencode_cli_shim
 ensure_codex_default_instructions
+ensure_opencode_default_instructions
 ensure_codex_global_writable_root
 
 AI_SANDBOX_NIX_AVAILABLE=1

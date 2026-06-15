@@ -132,6 +132,7 @@ run_agents_sync() {
   local sync_mode="$1"
   local path_arg="$2"
   local host_codex_home host_agents default_path disable_seed default_agents
+  local opencode_config_dir opencode_agents
 
   require_absolute_home_storage
   host_codex_home="$HOME_STORAGE/.codex"
@@ -140,6 +141,9 @@ run_agents_sync() {
   default_agents="$BUILD_CONTEXT/AGENTS.md"
   ensure_host_codex_home "$host_codex_home"
   default_path="$PWD/AGENTS.md"
+
+  opencode_config_dir="$HOME_STORAGE/.config/opencode"
+  opencode_agents="$opencode_config_dir/AGENTS.md"
 
   if [[ -n "$path_arg" ]]; then
     if [[ "$path_arg" == /* ]]; then
@@ -176,6 +180,22 @@ run_agents_sync() {
       exit 1
       ;;
   esac
+
+  mkdir -p "$opencode_config_dir"
+  if [[ -f "$host_agents" ]]; then
+    if [[ -L "$opencode_agents" ]]; then
+      :
+    elif [[ -e "$opencode_agents" && ! -L "$opencode_agents" ]]; then
+      rm -f "$opencode_agents"
+      ln -sf "$host_agents" "$opencode_agents"
+    else
+      ln -sf "$host_agents" "$opencode_agents"
+    fi
+    echo "Linked opencode global AGENTS to $host_agents"
+  else
+    rm -f "$opencode_agents"
+    echo "Removed opencode global AGENTS symlink (no source file)"
+  fi
 }
 
 run_skills_sync() {

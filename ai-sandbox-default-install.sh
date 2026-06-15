@@ -12,7 +12,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --only)
       shift
-      [[ $# -gt 0 ]] || { echo "--only requires all|codex|vscode" >&2; exit 2; }
+      [[ $# -gt 0 ]] || { echo "--only requires all|codex|opencode|vscode" >&2; exit 2; }
       only="$1"
       shift
       ;;
@@ -47,6 +47,17 @@ install_codex() {
   echo "AI_SANDBOX: Codex installation complete."
 }
 
+install_opencode() {
+  if [[ "$force" -eq 0 ]] && command -v opencode >/dev/null 2>&1; then
+    echo "AI_SANDBOX: opencode already present in user space; skipping."
+    return
+  fi
+  echo "AI_SANDBOX: installing opencode.ai in user space..."
+  log_cmd npm install -g opencode-ai@latest
+  npm install -g opencode-ai@latest
+  echo "AI_SANDBOX: opencode installation complete."
+}
+
 install_vscode() {
   echo "AI_SANDBOX: ensuring user-space VS Code is available..."
   if [[ "$force" -eq 1 ]]; then
@@ -63,16 +74,20 @@ install_vscode() {
 case "$only" in
   all)
     install_codex
+    install_opencode
     install_vscode
     ;;
   codex)
     install_codex
     ;;
+  opencode)
+    install_opencode
+    ;;
   vscode)
     install_vscode
     ;;
   *)
-    echo "Invalid --only value: $only (expected all|codex|vscode)" >&2
+    echo "Invalid --only value: $only (expected all|codex|opencode|vscode)" >&2
     exit 2
     ;;
 esac
