@@ -50,7 +50,9 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 - Before adding a fix, inspect call flow and ownership boundaries to avoid solving the same problem multiple times in different layers.
 
 ## Coding principles
-- Use functional style where practical: avoid hidden side effects, avoid global state, pass dependencies as function arguments, and prefer composition over inheritance.
+- **Functional programming first**: no side effects, no global state, no mutation.
+  Pass all dependencies as function arguments. Prefer currying when it improves
+  composability and reuse. Prefer composition over inheritance.
 - Code should be easy to understand, not fancy. Explicit is better than implicit.
 - Keep functions focused: one function, one purpose.
 - Target function size around 40 lines max. If longer is needed, split by responsibility or explain why.
@@ -85,6 +87,9 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 - Do not introduce random styling; follow the established design language.
 
 ## Communication expectations
+- Prefer simple, plain English. Avoid unnecessary jargon, expert terminology,
+  or overly complex language. Clear explanations beat impressive-sounding ones
+  — complex language can hide gaps in reasoning or lack of understanding.
 - When answering questions, provide reasons, not just conclusions.
 - When proposing plans or function changes, be concise and specific.
 - When useful, include the proposed function signature.
