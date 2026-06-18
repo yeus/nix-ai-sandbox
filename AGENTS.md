@@ -11,24 +11,37 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 
 ## Sandbox capabilities (what the AI can do here)
 - You are running inside an AI sandbox container, not on the host system.
-- `/workspace` is the sandbox container's mount point and does not exist as the same
-  absolute path on the parent host. Do not assume `/workspace/...` is a valid host path.
-- Prefer relative paths for routine navigation, reads, and edits. Use absolute paths only
-  when a tool explicitly requires them or when disambiguation is necessary.
-- The AI can edit files in the mounted workspace and run CLI tools in the sandbox terminal.
-- The AI can install system packages from inside the sandbox terminal using `apt`/`apt-get`
-  (passwordless sudo wrapper is available for `apt`, `apt-get`, and `dpkg` in this image).
-- The AI can modify global Codex instructions at:
+- `/workspace` is the sandbox container's mount point that maps to the project
+  directory on the parent host. Do not assume `/workspace/...` is a valid host
+  path — it only exists inside this container.
+- Prefer relative paths for routine navigation, reads, and edits. Use absolute
+  paths only when a tool explicitly requires them or when disambiguation is
+  necessary.
+- The AI can edit files in the mounted workspace and run CLI tools in the
+  sandbox terminal.
+- The AI can install system packages from inside the sandbox terminal using
+  `apt`/`apt-get` (passwordless sudo wrapper is available for `apt`, `apt-get`,
+  and `dpkg` in this image).
+
+## Shared global AGENTS.md (single source of truth)
+- Both Codex and opencode.ai share the same global AGENTS.md via a symlink:
+  - Codex reads:        `~/.codex/AGENTS.md`
+  - opencode.ai reads:  `~/.config/opencode/AGENTS.md`
+  - The opencode.ai path is a symlink to the Codex path, so editing either
+    file changes the same content.
+- The AI can modify the shared global instructions file at:
   `/sandbox-home/.codex/AGENTS.md`
-- The AI can sync/reset global instructions with `ai-sandbox` commands from host side:
+  (or equivalently `/sandbox-home/.config/opencode/AGENTS.md`)
+- The AI can sync/reset global instructions with `ai-sandbox` commands from
+  host side:
   - `ai-sandbox agents pull|push`
   - `ai-sandbox agents reset` (overwrite global custom AGENTS with default template)
   - `ai-sandbox agents clear` (remove global custom AGENTS/override so default re-seeds)
 - Inside this sandbox terminal, `ai-sandbox` is available as a command alias to
   `/workspace/ai-sandbox/ai-sandbox`, so the AI can run `ai-sandbox agents reset|clear`
   directly from within the sandbox.
-- Project-local `AGENTS.md` and global `~/.codex/AGENTS.md` are different layers; do not
-  confuse them when applying instruction changes.
+- Project-local `AGENTS.md` and the shared global `AGENTS.md` are different
+  layers; do not confuse them when applying instruction changes.
 
 ## Root-cause policy (upstream first)
 - Always trace bugs or change requests to the highest upstream source in the codebase and fix it there first.
@@ -37,7 +50,9 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 - Before adding a fix, inspect call flow and ownership boundaries to avoid solving the same problem multiple times in different layers.
 
 ## Coding principles
-- Use functional style where practical: avoid hidden side effects, avoid global state, pass dependencies as function arguments, and prefer composition over inheritance.
+- **Functional programming first**: no side effects, no global state, no mutation.
+  Pass all dependencies as function arguments. Prefer currying when it improves
+  composability and reuse. Prefer composition over inheritance.
 - Code should be easy to understand, not fancy. Explicit is better than implicit.
 - Keep functions focused: one function, one purpose.
 - Target function size around 40 lines max. If longer is needed, split by responsibility or explain why.
@@ -72,6 +87,9 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 - Do not introduce random styling; follow the established design language.
 
 ## Communication expectations
+- Prefer simple, plain English. Avoid unnecessary jargon, expert terminology,
+  or overly complex language. Clear explanations beat impressive-sounding ones
+  — complex language can hide gaps in reasoning or lack of understanding.
 - When answering questions, provide reasons, not just conclusions.
 - When proposing plans or function changes, be concise and specific.
 - When useful, include the proposed function signature.
