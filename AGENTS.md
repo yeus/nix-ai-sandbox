@@ -13,7 +13,7 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 - You are running inside an AI sandbox container, not on the host system.
 - `/workspace` is the sandbox container's mount point that maps to the project
   directory on the parent host. Do not assume `/workspace/...` is a valid host
-  path — it only exists inside this container.
+  path -- it only exists inside this container.
 - Prefer relative paths for routine navigation, reads, and edits. Use absolute
   paths only when a tool explicitly requires them or when disambiguation is
   necessary.
@@ -49,6 +49,17 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 - Treat local workarounds as last resort only: if unavoidable, explain why upstream resolution is not feasible and document residual risk.
 - Before adding a fix, inspect call flow and ownership boundaries to avoid solving the same problem multiple times in different layers.
 
+## Critical evaluation
+- Be meaningfully critical of requests instead of defaulting to agreement.
+- Actively look for weak assumptions, hidden complexity, missing constraints,
+  simpler alternatives, and likely failure modes.
+- Push back clearly when an idea seems overcomplicated, underspecified, risky,
+  or inconsistent with the existing codebase.
+- When discussing architecture, plans, or product direction, separate agreement
+  from evaluation: state what is good, what is questionable, what could break,
+  and what alternative you would choose.
+- Give concrete reasons, not vague approval.
+
 ## Coding principles
 - **Functional programming first**: no side effects, no global state, no mutation.
   Pass all dependencies as function arguments. Prefer currying when it improves
@@ -60,14 +71,14 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 - Never write redundant code. Before adding new code, check whether equivalent logic already exists.
 - If the same behavior is needed in multiple places, extract it into a reusable function with explicit parameters instead of duplicating it.
 - Even when logic is only sufficiently similar (not identical), prefer abstraction over copy/paste: generalize it into a reusable function or break it into smaller composable functions with explicit inputs.
-- Be critical when appropriate: if a request is risky or unclear, say so and suggest a safer approach.
 
-## bash commands for user
-
-- we are in a sandbox here, so the user can not copy long, single-line cli commands
-  without linebreaks.  You need to explicitly add line breaks and '\' and make sure,
-  a command never exceeds 50 chars width. Number of lines doesn't matter...
-- inside this ai-sandbox image, `apt`, `apt-get`, and `dpkg` are allowed via passwordless
+## Bash commands for user
+- Prefer CLI examples that are easy to copy safely.
+- Long single-line commands can be visually wrapped and copied with accidental
+  newlines, so format long commands explicitly with `\` line continuations.
+- Keep command lines short where practical, especially for commands the user is
+  expected to copy from chat.
+- Inside this ai-sandbox image, `apt`, `apt-get`, and `dpkg` are allowed via passwordless
   sudo wrapper. If system packages are missing, you may install them directly from inside
   the sandbox terminal.
 
@@ -89,7 +100,7 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 ## Communication expectations
 - Prefer simple, plain English. Avoid unnecessary jargon, expert terminology,
   or overly complex language. Clear explanations beat impressive-sounding ones
-  — complex language can hide gaps in reasoning or lack of understanding.
+  -- complex language can hide gaps in reasoning or lack of understanding.
 - When answering questions, provide reasons, not just conclusions.
 - When proposing plans or function changes, be concise and specific.
 - When useful, include the proposed function signature.
