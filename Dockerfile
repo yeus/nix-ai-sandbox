@@ -67,9 +67,8 @@ RUN chmod 0755 /usr/local/bin/apt
 RUN curl -fsSL https://starship.rs/install.sh | sh -s -- --yes
 RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
-    npm install -g npm@latest
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
+    apt-get install -y nodejs
 
 RUN useradd -m -s /bin/bash dev
 
