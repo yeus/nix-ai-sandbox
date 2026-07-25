@@ -10,6 +10,7 @@ let
     cp ${./ai-sandbox-open-url.sh} "$out/ai-sandbox-open-url.sh"
     cp ${./ai-sandbox-xdg-open.sh} "$out/ai-sandbox-xdg-open.sh"
     cp ${./ai-sandbox-vscode-update.sh} "$out/ai-sandbox-vscode-update.sh"
+    cp ${./ai-sandbox-code-server-update.sh} "$out/ai-sandbox-code-server-update.sh"
     cp ${./ai-sandbox-user-code.sh} "$out/ai-sandbox-user-code.sh"
     cp ${./ai-sandbox-default-install.sh} "$out/ai-sandbox-default-install.sh"
     cp ${./AGENTS.md} "$out/AGENTS.md"
@@ -19,6 +20,7 @@ let
       "$out/ai-sandbox-open-url.sh" \
       "$out/ai-sandbox-xdg-open.sh" \
       "$out/ai-sandbox-vscode-update.sh" \
+      "$out/ai-sandbox-code-server-update.sh" \
       "$out/ai-sandbox-user-code.sh" \
       "$out/ai-sandbox-default-install.sh" \
       "$out/AGENTS.md"
@@ -41,6 +43,7 @@ let
       pkgs.bash
       pkgs.gnused
       pkgs.procps
+      pkgs.curl
     ]}:$PATH
 
     exec ${./ai-sandbox} "$@"
@@ -60,7 +63,7 @@ let
 
     if [[ "$#" -gt 0 ]]; then
       case "$1" in
-        start|shell|warm|exec|install|build|logs|doctor-net|reconnect-network|build-base|rebuild|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
+        start|serve|shell|warm|exec|install|build|logs|doctor-net|reconnect-network|build-base|rebuild|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
           exec ${aiSandboxScript}/bin/ai-sandbox "$@"
           ;;
         *)

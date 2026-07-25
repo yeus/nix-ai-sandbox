@@ -12,13 +12,13 @@ while [[ $# -gt 0 ]]; do
       ;;
     --only)
       shift
-      [[ $# -gt 0 ]] || { echo "--only requires all|codex|opencode|vscode" >&2; exit 2; }
+      [[ $# -gt 0 ]] || { echo "--only requires all|codex|opencode|vscode|code-server" >&2; exit 2; }
       only="$1"
       shift
       ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: ai-sandbox-default-install [--force] [--only all|codex|vscode]" >&2
+      echo "Usage: ai-sandbox-default-install [--force] [--only all|codex|opencode|vscode|code-server]" >&2
       exit 2
       ;;
   esac
@@ -26,7 +26,7 @@ done
 
 mkdir -p "$HOME/.local/bin" "$HOME/.local/opt" "$HOME/.npm-global/bin"
 export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}"
-export PATH="$HOME/.local/bin:$NPM_CONFIG_PREFIX/bin:$HOME/.local/opt/vscode/bin:$PATH"
+export PATH="$HOME/.local/bin:$NPM_CONFIG_PREFIX/bin:$HOME/.local/opt/vscode/bin:$HOME/.local/opt/code-server/bin:$PATH"
 
 ts() {
   date -u +'%Y-%m-%dT%H:%M:%SZ'
@@ -71,6 +71,19 @@ install_vscode() {
   echo "AI_SANDBOX: VS Code check/install complete."
 }
 
+install_code_server() {
+  echo "AI_SANDBOX: ensuring user-space code-server is available..."
+  if [[ "$force" -eq 1 ]]; then
+    log_cmd /usr/local/bin/ai-sandbox-code-server-update --force
+    /usr/local/bin/ai-sandbox-code-server-update --force
+    echo "AI_SANDBOX: code-server forced update complete."
+    return
+  fi
+  log_cmd /usr/local/bin/ai-sandbox-code-server-update --if-missing
+  /usr/local/bin/ai-sandbox-code-server-update --if-missing
+  echo "AI_SANDBOX: code-server check/install complete."
+}
+
 case "$only" in
   all)
     install_codex
@@ -86,8 +99,11 @@ case "$only" in
   vscode)
     install_vscode
     ;;
+  code-server)
+    install_code_server
+    ;;
   *)
-    echo "Invalid --only value: $only (expected all|codex|opencode|vscode)" >&2
+    echo "Invalid --only value: $only (expected all|codex|opencode|vscode|code-server)" >&2
     exit 2
     ;;
 esac

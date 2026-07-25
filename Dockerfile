@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y \
     sudo \
     tree \
     unzip \
+    util-linux \
     wget \
     xauth \
     xdg-utils \
@@ -105,6 +106,7 @@ COPY container-entrypoint.sh /usr/local/bin/container-entrypoint.sh
 COPY ai-sandbox-open-url.sh /usr/local/bin/ai-sandbox-open-url
 COPY ai-sandbox-xdg-open.sh /usr/local/bin/ai-sandbox-xdg-open
 COPY ai-sandbox-vscode-update.sh /usr/local/bin/ai-sandbox-vscode-update
+COPY ai-sandbox-code-server-update.sh /usr/local/bin/ai-sandbox-code-server-update
 COPY ai-sandbox-user-code.sh /usr/local/bin/ai-sandbox-user-code
 COPY ai-sandbox-default-install.sh /usr/local/bin/ai-sandbox-default-install
 COPY AGENTS.md /usr/local/share/ai-sandbox/default-AGENTS.md
@@ -114,6 +116,7 @@ RUN chmod +x \
     /usr/local/bin/ai-sandbox-open-url \
     /usr/local/bin/ai-sandbox-xdg-open \
     /usr/local/bin/ai-sandbox-vscode-update \
+    /usr/local/bin/ai-sandbox-code-server-update \
     /usr/local/bin/ai-sandbox-user-code \
     /usr/local/bin/ai-sandbox-default-install \
     && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/local/bin/xdg-open \

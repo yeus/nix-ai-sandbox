@@ -22,6 +22,10 @@ Usage:
   ai-sandbox [start] [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--logs] [--auto-reconnect|--no-auto-reconnect] [--auto-reconnect-interval SECONDS]
     Start (or attach to) the sandbox for a workspace and launch VS Code by default.
 
+  ai-sandbox serve [WORKSPACE] [--flake PATH] [--instance NAME] [--port PORT] [--logs]
+  ai-sandbox serve [WORKSPACE] [--instance NAME] --stop
+    Start or stop browser-based code-server on a stable loopback port.
+
   ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [-- COMMAND [ARGS...]]
     Start/attach the sandbox and open an interactive shell (or run command after --).
 
@@ -31,10 +35,10 @@ Usage:
   ai-sandbox exec [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] -- COMMAND [ARGS...]
     Run a command inside the sandbox container.
 
-  ai-sandbox install [WORKSPACE] [--force] [--only all|codex|vscode]
+  ai-sandbox install [WORKSPACE] [--force] [--only all|codex|opencode|vscode|code-server]
     Install default tools/components inside the sandbox image/runtime.
 
-  ai-sandbox build [WORKSPACE] [--force] [--only all|codex|vscode]
+  ai-sandbox build [WORKSPACE] [--force] [--only all|codex|opencode|vscode|code-server]
     Build/update sandbox tool layers without starting an editor session.
 
   ai-sandbox logs [WORKSPACE] [-f|--follow]
@@ -256,6 +260,29 @@ follow_startup_logs_until_vscode() {
   ) || true
 }
 
+wait_for_code_server() {
+  local container="$1"
+  local port="$2"
+  local attempt
+  echo "Waiting for code-server on 127.0.0.1:$port..."
+  for ((attempt = 1; attempt <= 90; attempt++)); do
+    if curl -fsS --max-time 1 "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; then
+      echo "AI_SANDBOX_READY_CODE_SERVER: http://127.0.0.1:$port"
+      echo "SSH tunnel: ssh -N -L $port:127.0.0.1:$port <remote-host>"
+      return 0
+    fi
+    if [[ "$(podman inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" != "true" ]]; then
+      echo "Code-server container stopped before becoming ready." >&2
+      podman logs "$container" >&2 || true
+      return 1
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for code-server." >&2
+  podman logs "$container" >&2 || true
+  return 1
+}
+
 ensure_vscode_url_handler() {
   local desktop_dir desktop_file ai_sandbox_cmd
   desktop_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
@@ -458,6 +485,74 @@ sanitize_container_name_part() {
   echo "$cleaned"
 }
 
+port_is_listening() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
+}
+
+port_is_assigned_elsewhere() {
+  local port="$1"
+  local own_file="$2"
+  local file
+  [[ -d "$STATE_DIR/code-server-ports" ]] || return 1
+  for file in "$STATE_DIR"/code-server-ports/*; do
+    [[ -f "$file" && "$file" != "$own_file" ]] || continue
+    [[ "$(<"$file")" == "$port" ]] && return 0
+  done
+  return 1
+}
+
+resolve_code_server_port() {
+  local hash="$1"
+  local instance="$2"
+  local container="$3"
+  local requested="$4"
+  local port_dir="$STATE_DIR/code-server-ports"
+  local assignment="$port_dir/${hash}-${instance}"
+  local existing_state stored candidate start offset
+  mkdir -p "$port_dir"
+  stored=""
+  [[ -f "$assignment" ]] && stored="$(<"$assignment")"
+  existing_state="$(podman inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)"
+
+  if [[ -n "$requested" ]]; then
+    if [[ -n "$stored" && "$stored" != "$requested" ]]; then
+      [[ "$existing_state" != "running" ]] ||
+        { echo "Stop the code-server before changing its port." >&2; return 1; }
+      if [[ -n "$existing_state" ]]; then
+        podman rm "$container" >/dev/null
+        existing_state=""
+      fi
+    fi
+    candidate="$requested"
+  elif [[ -n "$stored" ]]; then
+    candidate="$stored"
+  else
+    start=$((18080 + 16#${hash:0:6} % 920))
+    candidate=""
+    for ((offset = 0; offset < 920; offset++)); do
+      local probe=$((18080 + (start - 18080 + offset) % 920))
+      if ! port_is_assigned_elsewhere "$probe" "$assignment" && ! port_is_listening "$probe"; then
+        candidate="$probe"
+        break
+      fi
+    done
+    [[ -n "$candidate" ]] ||
+      { echo "No free code-server port found in 18080-18999." >&2; return 1; }
+  fi
+
+  if port_is_assigned_elsewhere "$candidate" "$assignment"; then
+    echo "Code-server port $candidate is assigned to another workspace." >&2
+    return 1
+  fi
+  if [[ "$existing_state" != "running" ]] && port_is_listening "$candidate"; then
+    echo "Code-server port $candidate is already in use." >&2
+    return 1
+  fi
+
+  printf '%s\n' "$candidate" >"$assignment"
+  printf '%s\n' "$candidate"
+}
+
 pick_auto_instance_name() {
   local base_name="$1"
   local preferred="default"
@@ -639,10 +734,12 @@ auto_reconnect_interval="${AI_SANDBOX_AUTO_RECONNECT_INTERVAL:-8}"
 sync_mode=""
 sync_path_arg=""
 reset_all_containers=0
+server_port=""
+server_stop=0
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    start|shell|warm|exec|install|build|logs|doctor-net|reconnect-network|build-base|rebuild|reset-container|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
+    start|serve|shell|warm|exec|install|build|logs|doctor-net|reconnect-network|build-base|rebuild|reset-container|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
       cmd="$1"
       shift
       ;;
@@ -710,7 +807,7 @@ while [[ $# -gt 0 ]]; do
     --only)
       if [[ "$cmd" == "install" || "$cmd" == "build" ]]; then
         shift
-        [[ $# -gt 0 ]] || { echo "--only requires all|codex|vscode" >&2; exit 1; }
+        [[ $# -gt 0 ]] || { echo "--only requires all|codex|opencode|vscode|code-server" >&2; exit 1; }
         install_only="$1"
         shift
         continue
@@ -735,6 +832,26 @@ while [[ $# -gt 0 ]]; do
       [[ $# -gt 0 ]] || { echo "--instance requires a name" >&2; exit 1; }
       instance_arg="$(sanitize_instance_name "$1")"
       shift
+      ;;
+    --port)
+      if [[ "$cmd" == "serve" ]]; then
+        shift
+        [[ $# -gt 0 ]] || { echo "--port requires a value" >&2; exit 1; }
+        server_port="$1"
+        shift
+        continue
+      fi
+      echo "--port is only valid with serve" >&2
+      exit 1
+      ;;
+    --stop)
+      if [[ "$cmd" == "serve" ]]; then
+        server_stop=1
+        shift
+        continue
+      fi
+      echo "--stop is only valid with serve" >&2
+      exit 1
       ;;
     --logs)
       follow_logs_on_start=1
@@ -817,12 +934,22 @@ if [[ "$cmd" == "exec" && ${#exec_command[@]} -eq 0 ]]; then
 fi
 
 case "$install_only" in
-  all|codex|vscode) ;;
+  all|codex|opencode|vscode|code-server) ;;
   *)
-    echo "Invalid --only value: $install_only (expected all|codex|vscode)" >&2
+    echo "Invalid --only value: $install_only (expected all|codex|opencode|vscode|code-server)" >&2
     exit 1
     ;;
 esac
+
+if [[ -n "$server_port" ]] && { ! [[ "$server_port" =~ ^[0-9]+$ ]] || [[ "$server_port" -lt 1024 ]] || [[ "$server_port" -gt 65535 ]]; }; then
+  echo "Invalid --port value: $server_port (expected integer 1024-65535)" >&2
+  exit 1
+fi
+
+if [[ "$cmd" == "serve" && "$NETWORK_MODE" != "host" ]]; then
+  echo "ai-sandbox serve requires host networking for loopback-only SSH forwarding." >&2
+  exit 1
+fi
 
 case "$NETWORK_MODE" in
   host|bridge) ;;
@@ -1080,6 +1207,9 @@ case "$cmd" in
   start|shell|warm|exec|install|repair-nix)
     ensure_image_exists
     ;;
+  serve)
+    [[ "$server_stop" -eq 1 ]] || ensure_image_exists
+    ;;
 esac
 
 [[ -d "$workspace" ]] || { echo "Workspace does not exist: $workspace" >&2; exit 1; }
@@ -1139,6 +1269,8 @@ project_slug="$(sanitize_container_name_part "$project_name" "workspace")"
 launch_context="vscode"
 if [[ "$cmd" == "shell" || "$cmd" == "warm" || "$cmd" == "exec" ]]; then
   launch_context="shell"
+elif [[ "$cmd" == "serve" ]]; then
+  launch_context="code-server"
 fi
 base_container_name="ai-sandbox-${project_slug}-${launch_context}-${workspace_hash}"
 if [[ -n "$instance_arg" ]]; then
@@ -1152,6 +1284,21 @@ else
   container_name="$base_container_name-$instance_arg"
 fi
 
+if [[ "$cmd" == "serve" && "$server_stop" -eq 1 ]]; then
+  if podman inspect "$container_name" >/dev/null 2>&1; then
+    podman stop "$container_name" >/dev/null
+    echo "Stopped code-server container $container_name."
+  else
+    echo "No code-server container found for $workspace (instance=$instance_arg)."
+  fi
+  exit 0
+fi
+
+code_server_port=""
+if [[ "$cmd" == "serve" ]]; then
+  code_server_port="$(resolve_code_server_port "$workspace_hash" "$instance_arg" "$container_name" "$server_port")"
+fi
+
 echo "$container_name" > "$STATE_DIR/last-container"
 
 # Keep process/cache/webview data per instance to avoid Chromium profile
@@ -1161,12 +1308,14 @@ vscode_profile_id="${workspace_hash}-${instance_arg}"
 vscode_user_data_dir="/sandbox-home/.vscode-data/instances/$vscode_profile_id"
 vscode_extensions_dir="/sandbox-home/.vscode-extensions/shared"
 vscode_shared_user_dir="/sandbox-home/.vscode-shared-user"
+code_server_user_data_dir="/sandbox-home/.code-server-data/instances/$vscode_profile_id"
+code_server_extensions_dir="/sandbox-home/.code-server-extensions/shared"
 
 theme="$(detect_theme)"
 
 host_dbus_args=()
 x11_args=()
-if [[ "$cmd" != "install" ]]; then
+if [[ "$cmd" != "install" && "$cmd" != "serve" ]]; then
   xauth_file="${XAUTHORITY:-$HOME/.Xauthority}"
   if [[ -n "${DISPLAY:-}" && -d /tmp/.X11-unix ]]; then
     x11_args+=(
@@ -1193,6 +1342,9 @@ if [[ "$cmd" != "install" ]]; then
   fi
 fi
 
+container_mode="$cmd"
+[[ "$cmd" == "serve" ]] && container_mode="server"
+
 common_args=(
   --name "$container_name"
   --init
@@ -1206,7 +1358,7 @@ common_args=(
   -e HOME=/sandbox-home
   -e CODEX_HOME=/sandbox-home/.codex
   -e XDG_RUNTIME_DIR=/tmp/xdg-runtime
-  -e "AI_SANDBOX_MODE=$cmd"
+  -e "AI_SANDBOX_MODE=$container_mode"
   -e "AI_SANDBOX_FLAKE=$flake_arg_container"
   -e "AI_SANDBOX_WORKSPACE=$container_workspace"
   -e "AI_SANDBOX_HOST_MOUNT_ROOT=$mount_root"
@@ -1218,6 +1370,9 @@ common_args=(
   -e "AI_SANDBOX_VSCODE_USER_DATA_DIR=$vscode_user_data_dir"
   -e "AI_SANDBOX_VSCODE_EXTENSIONS_DIR=$vscode_extensions_dir"
   -e "AI_SANDBOX_VSCODE_SHARED_USER_DIR=$vscode_shared_user_dir"
+  -e "AI_SANDBOX_CODE_SERVER_USER_DATA_DIR=$code_server_user_data_dir"
+  -e "AI_SANDBOX_CODE_SERVER_EXTENSIONS_DIR=$code_server_extensions_dir"
+  -e "AI_SANDBOX_CODE_SERVER_PORT=$code_server_port"
   -v "$mount_root:/workspace${selinux_label_opt}"
   -v "$home_mount_spec"
   -v "$nix_mount_spec"
@@ -1254,7 +1409,11 @@ run_detached() {
   else
     echo "Auto-reconnect watcher disabled."
   fi
-  follow_startup_logs_until_vscode "$container_name"
+  if [[ "$cmd" == "serve" ]]; then
+    wait_for_code_server "$container_name" "$code_server_port"
+  else
+    follow_startup_logs_until_vscode "$container_name"
+  fi
   if [[ "$follow_logs_on_start" -eq 1 ]]; then
     echo "Continuing to follow logs for $container_name (Ctrl-C to stop following; container keeps running)..."
     podman logs -f --tail 0 "$container_name"
@@ -1379,6 +1538,7 @@ run_install() {
 
 case "$cmd" in
   start) run_detached ;;
+  serve) run_detached ;;
   shell) run_shell ;;
   warm) run_interactive ;;
   exec) run_exec ;;

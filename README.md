@@ -175,6 +175,48 @@ Each sandbox instance now uses a hybrid VS Code profile model (details below).
 
 If you do not pass `--instance`, ai-sandbox now uses a stable default instance name per workspace so VS Code profile state is preserved across relaunches. If that default instance is already running, ai-sandbox automatically falls back to a unique instance suffix.
 
+Start code-server in a persistent, browser-accessible sandbox instead of
+desktop VS Code:
+
+```bash
+ai-sandbox serve .
+```
+
+`serve` uses the same workspace mount and `nix develop` environment as
+`start`, but it does not grant the container access to X11, DRI, Xauthority,
+or the host D-Bus session. It lazily installs code-server into the persistent
+sandbox home and prints its stable loopback URL and an SSH tunnel command.
+
+From the client computer or an SSH client with local port forwarding:
+
+```bash
+ssh -N \
+  -L 18080:127.0.0.1:18080 \
+  user@remote-host
+```
+
+Use the actual stable port printed by `serve`, then open the corresponding
+`http://127.0.0.1:<port>` URL. The endpoint has no additional password because
+it listens only on remote loopback; SSH authentication is the access boundary.
+Bridge networking is intentionally rejected for this mode.
+
+Choose a port explicitly when first creating the server, or while it is
+stopped:
+
+```bash
+ai-sandbox serve . --port 18123
+```
+
+Stop the server without removing its persistent container or editor data:
+
+```bash
+ai-sandbox serve . --stop
+```
+
+Browser-editor profiles and extensions are separate from desktop VS Code
+profiles because code-server extension compatibility differs. Repository
+`.vscode` configuration remains shared through the workspace mount.
+
 Open an interactive shell in the sandbox:
 
 ```bash

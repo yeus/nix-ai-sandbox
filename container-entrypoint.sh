@@ -10,7 +10,7 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}"
 export NIX_CONFIG="experimental-features = nix-command flakes"
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}"
-export PATH="$HOME/.local/bin:$NPM_CONFIG_PREFIX/bin:$HOME/.local/opt/vscode/bin:$PATH"
+export PATH="$HOME/.local/bin:$NPM_CONFIG_PREFIX/bin:$HOME/.local/opt/vscode/bin:$HOME/.local/opt/code-server/bin:$PATH"
 
 mode="${AI_SANDBOX_MODE:-start}"
 workspace="${AI_SANDBOX_WORKSPACE:-/workspace}"
@@ -19,12 +19,18 @@ theme="${AI_SANDBOX_THEME:-light}"
 vscode_user_data_dir="${AI_SANDBOX_VSCODE_USER_DATA_DIR:-$HOME/.vscode-data}"
 vscode_extensions_dir="${AI_SANDBOX_VSCODE_EXTENSIONS_DIR:-$HOME/.vscode-extensions}"
 vscode_shared_user_dir="${AI_SANDBOX_VSCODE_SHARED_USER_DIR:-$HOME/.vscode-shared-user}"
+code_server_user_data_dir="${AI_SANDBOX_CODE_SERVER_USER_DATA_DIR:-$HOME/.code-server-data}"
+code_server_extensions_dir="${AI_SANDBOX_CODE_SERVER_EXTENSIONS_DIR:-$HOME/.code-server-extensions}"
+code_server_port="${AI_SANDBOX_CODE_SERVER_PORT:-}"
 auto_nix_repair="${AI_SANDBOX_AUTO_NIX_REPAIR:-1}"
 
 # Child shells launched via `bash -lc` must see these values.
 export vscode_user_data_dir
 export vscode_extensions_dir
 export vscode_shared_user_dir
+export code_server_user_data_dir
+export code_server_extensions_dir
+export code_server_port
 
 mkdir -p \
   "$HOME" \
@@ -36,6 +42,8 @@ mkdir -p \
   "$vscode_extensions_dir" \
   "$vscode_shared_user_dir" \
   "$vscode_user_data_dir/User" \
+  "$code_server_user_data_dir" \
+  "$code_server_extensions_dir" \
   "$XDG_RUNTIME_DIR"
 
 chmod 700 "$XDG_RUNTIME_DIR" || true
@@ -723,6 +731,7 @@ run_nix_develop_with_auto_repair() {
 }
 
 echo "AI_SANDBOX_VSCODE_DIRS: user-data=$vscode_user_data_dir extensions=$vscode_extensions_dir shared-user=$vscode_shared_user_dir"
+echo "AI_SANDBOX_CODE_SERVER_DIRS: user-data=$code_server_user_data_dir extensions=$code_server_extensions_dir"
 
 launch_code_cmd='
   export BROWSER=/usr/local/bin/ai-sandbox-xdg-open
@@ -739,6 +748,23 @@ launch_code_cmd='
     --verbose \
     --user-data-dir "$vscode_user_data_dir" \
     --extensions-dir "$vscode_extensions_dir" \
+    "$1"
+'
+
+launch_code_server_cmd='
+  [[ "$code_server_port" =~ ^[0-9]+$ ]] || {
+    echo "AI_SANDBOX: code-server mode requires AI_SANDBOX_CODE_SERVER_PORT." >&2
+    exit 2
+  }
+  /usr/local/bin/ai-sandbox-code-server-update --if-missing
+  echo "AI_SANDBOX_READY_CODE_SERVER: starting on 127.0.0.1:${code_server_port} for $1"
+  exec code-server \
+    --bind-addr "127.0.0.1:${code_server_port}" \
+    --auth none \
+    --disable-telemetry \
+    --disable-update-check \
+    --user-data-dir "$code_server_user_data_dir" \
+    --extensions-dir "$code_server_extensions_dir" \
     "$1"
 '
 
@@ -853,6 +879,23 @@ case "$mode" in
       fi
     fi
     exec /bin/bash -lc "$launch_code_cmd" _ "$workspace"
+    ;;
+  server)
+    if [[ -n "$flake_target" ]]; then
+      if run_nix_develop_with_auto_repair capture_all /bin/bash -lc "$launch_code_server_cmd" _ "$workspace"; then
+        exit 0
+      fi
+      if [[ "$last_nix_develop_missing_default_devshell" == "1" ]]; then
+        echo "AI_SANDBOX: no default dev shell exported by $flake_target; launching code-server without nix develop."
+        echo "Hint: pass --flake to a different flake, or add devShells.x86_64-linux.default if you want nix develop on startup."
+      else
+        echo "Flake found at $flake_target but no usable devShell; launching code-server without nix develop."
+      fi
+      if [[ "$last_nix_develop_store_corruption" == "1" ]]; then
+        print_nix_store_recovery_hint
+      fi
+    fi
+    exec /bin/bash -lc "$launch_code_server_cmd" _ "$workspace"
     ;;
   *)
     echo "Unknown mode: $mode" >&2
