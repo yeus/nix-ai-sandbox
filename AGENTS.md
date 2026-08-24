@@ -25,6 +25,24 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
   `apt`/`apt-get` (passwordless sudo wrapper is available for `apt`, `apt-get`,
   and `dpkg` in this image).
 
+## User-run host scripts
+
+- For host-specific, privileged, GUI, network, or otherwise
+  environment-dependent diagnostics, write a runnable script for the user to
+  execute rather than executing the host operation automatically.
+- Keep these scripts read-only and non-destructive by default. Do not require
+  an interactive sudo password, modify system configuration, or expose
+  credentials, private keys, or other secrets unless the user explicitly asks
+  for that behavior.
+- Put repository scripts under `scripts/` and write timestamped diagnostic
+  reports into the repository root or another location the user specifies.
+  Use restrictive report permissions when logs may contain sensitive details.
+- Provide the exact command to run and explain what output or report to return.
+  Once the user has run it and the result is available in the shared workspace,
+  inspect that result before recommending changes.
+- This preference does not prevent harmless syntax checks, static inspection,
+  or repository-local tests in the sandbox.
+
 ## Shared global AGENTS.md (single source of truth)
 
 - Both Codex and opencode.ai share the same global AGENTS.md via a symlink:
