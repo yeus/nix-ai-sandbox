@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rebase Feature Branches"
+  short_description: "Safely rebase selected remote branches"
+  default_prompt: "Use $rebase-feat-branches to ask which remote feature namespace is authoritative, recreate matching local feat/* branches, and rebase them with per-commit conflict audits."

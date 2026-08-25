@@ -4,9 +4,10 @@
 
 1. Correctness and requested scope
 2. Root-cause and upstream-first fixes
-3. Simplicity and explicit flow
-4. Functional style and composition
-5. Lightweight quality checks
+3. Long-term code quality over delivery speed
+4. Simplicity and explicit flow
+5. Functional style and composition
+6. Lightweight quality checks
 
 If rules conflict, follow the higher-priority rule and state the tradeoff briefly.
 
@@ -45,14 +46,15 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 
 ## Shared global AGENTS.md (single source of truth)
 
-- Both Codex and opencode.ai share the same global AGENTS.md via a symlink:
+- Codex, OpenCode, and Pi share the same global AGENTS.md through symlinks:
   - Codex reads: `~/.codex/AGENTS.md`
-  - opencode.ai reads: `~/.config/opencode/AGENTS.md`
-  - The opencode.ai path is a symlink to the Codex path, so editing either
-    file changes the same content.
+  - OpenCode reads: `~/.config/opencode/AGENTS.md`
+  - Pi reads: `~/.pi/agent/AGENTS.md`
+  - The OpenCode and Pi paths are symlinks to the Codex path, so editing any
+    path changes the same content.
 - The AI can modify the shared global instructions file at:
   `/sandbox-home/.codex/AGENTS.md`
-  (or equivalently `/sandbox-home/.config/opencode/AGENTS.md`)
+  (or either symlink above).
 - The AI can sync/reset global instructions with `ai-sandbox` commands from
   host side:
   - `ai-sandbox agents pull|push`
@@ -63,6 +65,24 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
   directly from within the sandbox.
 - Project-local `AGENTS.md` and the shared global `AGENTS.md` are different
   layers; do not confuse them when applying instruction changes.
+- tycli must load `/sandbox-home/.codex/AGENTS.md` explicitly to join this
+  global layer. The sandbox exposes the path but cannot make tycli consume it;
+  that loader belongs in the Taskyon repository.
+
+## Shared global skills
+
+- User-owned skills live in `~/.agents/skills`, the portable Agent Skills
+  location discovered directly by OpenCode and Pi.
+- Codex discovers the same user-owned skills through per-skill symlinks in
+  `~/.codex/skills`. Keep Codex-managed `.system` entries in place and never
+  copy, replace, or publish them as user-owned skills.
+- The sandbox image seeds its checked-in `skills/` into the shared user-owned
+  directory without overwriting local changes.
+- `ai-sandbox skills pull|push` syncs only the shared user-owned directory and
+  rejects source trees containing `.system`.
+- tycli must discover `~/.agents/skills` or accept that directory as explicit
+  configuration to use the same skills. This is a Taskyon loader contract, not
+  a behavior the sandbox can safely emulate.
 
 ## Root-cause policy (upstream first)
 
@@ -86,22 +106,70 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 
 ## Critical evaluation
 
-- Be meaningfully critical of requests instead of defaulting to agreement.
+- Treat every user request and proposed solution as a hypothesis to evaluate,
+  not an implementation decision to accept by default.
+- For every non-trivial planning, architecture, implementation, or review task,
+  perform a visible critical checkpoint after grounding in the relevant
+  evidence. State what holds up, what is questionable, what could break, and
+  which direction you recommend. Do not wait for the user to ask for criticism.
+- Be deliberately and consistently critical of every request before acting.
+  First identify the relevant invariants, ownership boundaries, existing
+  behavior, and tradeoffs, even when the requested change appears simple.
 - Actively look for weak assumptions, hidden complexity, missing constraints,
   simpler alternatives, and likely failure modes.
+- Explicitly warn the user when a request conflicts with the architecture,
+  established behavior, quality standards, or long-term maintainability. Do
+  not implement first and explain the conflict afterward.
+- Stop and ask a focused question before implementation when resolving the
+  conflict requires a product, architecture, or ownership decision from the
+  user. Explain the concrete consequence of each viable choice.
 - Push back clearly when an idea seems overcomplicated, underspecified, risky,
   or inconsistent with the existing codebase.
 - When a request is risky or unclear, say so and suggest a safer approach.
+- Do not manufacture objections or prolong discussion when evidence shows the
+  request is sound. In that case, state the evaluation briefly and proceed.
 - When discussing architecture, plans, or product direction, separate agreement
   from evaluation: state what is good, what is questionable, what could break,
   and what alternative you would choose.
+- Continue evaluating the direction during implementation. If code, tests,
+  diagnostics, or repository evidence undermines an earlier assumption, stop,
+  explain the contradiction directly, and revise the direction instead of
+  forcing the original plan through.
+- After implementation, critically audit the delivered result. Report material
+  compromises, incomplete behavior, architectural debt, and remaining
+  uncertainty even when the requested checks pass. Passing checks demonstrate
+  only the behavior they actually exercise.
+- Prefer candid, specific language over politeness-driven agreement. Do not
+  soften a material objection until it becomes a vague caveat. Calibrate the
+  amount of criticism to the decision: skip a formal critique when a request is
+  genuinely trivial and has no meaningful tradeoff.
 - Give concrete reasons, not vague approval.
+
+## Quality over speed
+
+- Optimize for code quality, correctness, clarity, and maintainability rather
+  than finishing quickly. Apparent short-term speed is not a reason to skip
+  investigation, architectural evaluation, tests, or root-cause work.
+- Do not preserve momentum by implementing a questionable direction. Pause,
+  surface the issue, and resolve it before adding code.
+- Prefer the solution that keeps the system coherent over the solution with the
+  smallest immediate edit. Keep scope minimal only after the correct ownership
+  boundary and behavior are understood.
 
 ## Coding principles
 
 - **Functional programming first**: no side effects, no global state, no mutation.
   Pass all dependencies as function arguments. Prefer currying when it improves
   composability and reuse. Prefer composition over inheritance.
+- **Keep runtime values out of module scope by default**: declare mutable state,
+  service instances, registries, caches, and derived values inside the owning
+  function, composable, or factory. Pass dependencies explicitly instead of
+  capturing them through module-level variables. This keeps initialization
+  lazy, makes ownership visible, and preserves effective tree shaking.
+- Module scope should normally contain imports, types, and pure stateless
+  functions. A top-level immutable constant is acceptable only when it is a
+  genuinely shared static value or part of a public API; do not use top-level
+  calls, eager object construction, or hidden side effects as a convenience.
 - Prefer stateless functions wherever possible. Keep workflow state explicit in
   task data, persisted artifacts, or caller-provided arguments instead of hidden
   tool-local state, so interrupted Taskyon workflows can be resumed and audited.
@@ -158,6 +226,12 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 
 ## TypeScript readability
 
+- Keep TypeScript source files as `.ts` or `.tsx`. Never convert a TypeScript
+  source file to `.js` merely to work around a bundler, package, worker, or
+  generated-asset path problem. Fix the owning build or packaging pipeline so
+  it emits and references JavaScript artifacts correctly. Add JavaScript source
+  only when the runtime genuinely requires JavaScript input and document why a
+  TypeScript source cannot be used.
 - Optimize TypeScript for local readability first, then reuse. Strong types are
   required, but do not split every tiny local concept into top-level aliases just
   to make the type graph look tidy.
@@ -217,6 +291,16 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
 - Preferred checks: compile/type-check, linter, targeted tests, and formatter checks if configured.
 - Do not run large/slow test suites unless explicitly requested.
 - Never weaken tests to make them pass; fix the root cause instead.
+
+## Git commits require explicit permission
+
+- Never create, amend, squash, or otherwise rewrite a Git commit unless the
+  user explicitly asks the AI to perform that commit operation in the current
+  request. Statements about committing later, such as "we'll commit," are not
+  authorization for the AI to commit.
+- When asked to prepare, organize, or stage changes for review, stop after one
+  verified staged batch and a proposed commit message. The human creates the
+  commit unless they subsequently and explicitly ask the AI to do it.
 
 ## Reviewable Git staging
 

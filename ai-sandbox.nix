@@ -13,7 +13,9 @@ let
     cp ${./ai-sandbox-code-server-update.sh} "$out/ai-sandbox-code-server-update.sh"
     cp ${./ai-sandbox-user-code.sh} "$out/ai-sandbox-user-code.sh"
     cp ${./ai-sandbox-default-install.sh} "$out/ai-sandbox-default-install.sh"
+    cp ${./ai-sandbox-agent-config.sh} "$out/ai-sandbox-agent-config.sh"
     cp ${./AGENTS.md} "$out/AGENTS.md"
+    cp -R ${./skills} "$out/skills"
     chmod 0644 \
       "$out/Dockerfile" \
       "$out/container-entrypoint.sh" \
@@ -23,6 +25,7 @@ let
       "$out/ai-sandbox-code-server-update.sh" \
       "$out/ai-sandbox-user-code.sh" \
       "$out/ai-sandbox-default-install.sh" \
+      "$out/ai-sandbox-agent-config.sh" \
       "$out/AGENTS.md"
   '';
 

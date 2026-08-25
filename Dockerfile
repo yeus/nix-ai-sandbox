@@ -109,7 +109,9 @@ COPY ai-sandbox-vscode-update.sh /usr/local/bin/ai-sandbox-vscode-update
 COPY ai-sandbox-code-server-update.sh /usr/local/bin/ai-sandbox-code-server-update
 COPY ai-sandbox-user-code.sh /usr/local/bin/ai-sandbox-user-code
 COPY ai-sandbox-default-install.sh /usr/local/bin/ai-sandbox-default-install
+COPY ai-sandbox-agent-config.sh /usr/local/bin/ai-sandbox-agent-config
 COPY AGENTS.md /usr/local/share/ai-sandbox/default-AGENTS.md
+COPY skills /usr/local/share/ai-sandbox/default-skills
 
 RUN chmod +x \
     /usr/local/bin/container-entrypoint.sh \
@@ -119,6 +121,7 @@ RUN chmod +x \
     /usr/local/bin/ai-sandbox-code-server-update \
     /usr/local/bin/ai-sandbox-user-code \
     /usr/local/bin/ai-sandbox-default-install \
+    /usr/local/bin/ai-sandbox-agent-config \
     && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/local/bin/xdg-open \
     && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/bin/xdg-open \
     && ln -sf /usr/local/bin/ai-sandbox-user-code /usr/local/bin/code

@@ -11,7 +11,7 @@ export AI_SANDBOX_NIX_STORAGE="$test_root/nix"
 
 "$ai_sandbox" help >"$test_root/help.txt"
 grep -F 'ai-sandbox serve [WORKSPACE]' "$test_root/help.txt"
-grep -F -- '--only all|codex|opencode|vscode|code-server' "$test_root/help.txt"
+grep -F -- '--only all|codex|opencode|pi|vscode|code-server' "$test_root/help.txt"
 
 if AI_SANDBOX_NETWORK_MODE=bridge \
   "$ai_sandbox" serve "$repo_root" >"$test_root/bridge.out" 2>"$test_root/bridge.err"; then

@@ -35,10 +35,10 @@ Usage:
   ai-sandbox exec [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] -- COMMAND [ARGS...]
     Run a command inside the sandbox container.
 
-  ai-sandbox install [WORKSPACE] [--force] [--only all|codex|opencode|vscode|code-server]
+  ai-sandbox install [WORKSPACE] [--force] [--only all|codex|opencode|pi|vscode|code-server]
     Install default tools/components inside the sandbox image/runtime.
 
-  ai-sandbox build [WORKSPACE] [--force] [--only all|codex|opencode|vscode|code-server]
+  ai-sandbox build [WORKSPACE] [--force] [--only all|codex|opencode|pi|vscode|code-server]
     Build/update sandbox tool layers without starting an editor session.
 
   ai-sandbox logs [WORKSPACE] [-f|--follow]
@@ -60,13 +60,13 @@ Usage:
     Attempt targeted repair steps for broken Nix state in the sandbox.
 
   ai-sandbox agents pull|push [--file PATH] [--force]
-    Sync AGENTS.md between global Codex home and a project file.
+    Sync the shared global AGENTS.md with a project file.
 
   ai-sandbox agents reset|clear
-    Reset or clear global Codex AGENTS state in sandbox home storage.
+    Reset or clear shared global AGENTS state in sandbox home storage.
 
   ai-sandbox skills pull|push [--dir PATH] [--force]
-    Sync global Codex skills directory with a project directory.
+    Sync user-owned shared skills with a project directory.
 
   ai-sandbox build-base
     Rebuild only the base sandbox image.
@@ -136,7 +136,8 @@ run_agents_sync() {
   local sync_mode="$1"
   local path_arg="$2"
   local host_codex_home host_agents default_path disable_seed default_agents
-  local opencode_config_dir opencode_agents
+  local opencode_config_dir opencode_agents opencode_agents_target
+  local pi_config_dir pi_agents pi_agents_target
 
   require_absolute_home_storage
   host_codex_home="$HOME_STORAGE/.codex"
@@ -148,6 +149,10 @@ run_agents_sync() {
 
   opencode_config_dir="$HOME_STORAGE/.config/opencode"
   opencode_agents="$opencode_config_dir/AGENTS.md"
+  opencode_agents_target="../../.codex/AGENTS.md"
+  pi_config_dir="$HOME_STORAGE/.pi/agent"
+  pi_agents="$pi_config_dir/AGENTS.md"
+  pi_agents_target="../../.codex/AGENTS.md"
 
   if [[ -n "$path_arg" ]]; then
     if [[ "$path_arg" == /* ]]; then
@@ -185,32 +190,40 @@ run_agents_sync() {
       ;;
   esac
 
-  mkdir -p "$opencode_config_dir"
+  mkdir -p "$opencode_config_dir" "$pi_config_dir"
   if [[ -f "$host_agents" ]]; then
     if [[ -L "$opencode_agents" ]]; then
-      :
-    elif [[ -e "$opencode_agents" && ! -L "$opencode_agents" ]]; then
-      rm -f "$opencode_agents"
-      ln -sf "$host_agents" "$opencode_agents"
+      ln -sfn "$opencode_agents_target" "$opencode_agents"
+      echo "Linked OpenCode global AGENTS to $host_agents"
+    elif [[ -e "$opencode_agents" ]]; then
+      echo "Preserved existing OpenCode global instructions at $opencode_agents" >&2
     else
-      ln -sf "$host_agents" "$opencode_agents"
+      ln -s "$opencode_agents_target" "$opencode_agents"
+      echo "Linked OpenCode global AGENTS to $host_agents"
     fi
-    echo "Linked opencode global AGENTS to $host_agents"
+    if [[ ! -e "$pi_agents" && ! -L "$pi_agents" ]]; then
+      ln -s "$pi_agents_target" "$pi_agents"
+      echo "Linked Pi global AGENTS to $host_agents"
+    elif [[ -L "$pi_agents" ]]; then
+      ln -sfn "$pi_agents_target" "$pi_agents"
+      echo "Linked Pi global AGENTS to $host_agents"
+    else
+      echo "Preserved existing Pi global instructions at $pi_agents" >&2
+    fi
   else
-    rm -f "$opencode_agents"
-    echo "Removed opencode global AGENTS symlink (no source file)"
+    [[ ! -L "$opencode_agents" ]] || rm -f "$opencode_agents"
+    [[ ! -L "$pi_agents" ]] || rm -f "$pi_agents"
+    echo "Removed shared global AGENTS symlinks (no source file)"
   fi
 }
 
 run_skills_sync() {
   local sync_mode="$1"
   local path_arg="$2"
-  local host_codex_home host_skills default_dir
+  local host_skills default_dir
 
   require_absolute_home_storage
-  host_codex_home="$HOME_STORAGE/.codex"
-  host_skills="$host_codex_home/skills"
-  ensure_host_codex_home "$host_codex_home"
+  host_skills="$HOME_STORAGE/.agents/skills"
   default_dir="$PWD/skills"
 
   if [[ -n "$path_arg" ]]; then
@@ -225,12 +238,16 @@ run_skills_sync() {
     pull)
       [[ -d "$host_skills" ]] || { echo "No global skills directory found at: $host_skills" >&2; exit 1; }
       copy_dir_with_guard "$host_skills" "$default_dir" "$install_force"
-      echo "Pulled global skills from $host_skills to $default_dir"
+      echo "Pulled shared user skills from $host_skills to $default_dir"
       ;;
     push)
       [[ -d "$default_dir" ]] || { echo "Source skills directory not found: $default_dir" >&2; exit 1; }
+      if [[ -e "$default_dir/.system" ]]; then
+        echo "Refusing to sync Codex-managed .system skills: $default_dir/.system" >&2
+        exit 1
+      fi
       copy_dir_with_guard "$default_dir" "$host_skills" "$install_force"
-      echo "Pushed skills from $default_dir to global path $host_skills"
+      echo "Pushed user skills from $default_dir to shared path $host_skills"
       ;;
     *)
       echo "Invalid skills mode: $sync_mode (expected pull|push)" >&2
@@ -807,7 +824,7 @@ while [[ $# -gt 0 ]]; do
     --only)
       if [[ "$cmd" == "install" || "$cmd" == "build" ]]; then
         shift
-        [[ $# -gt 0 ]] || { echo "--only requires all|codex|opencode|vscode|code-server" >&2; exit 1; }
+        [[ $# -gt 0 ]] || { echo "--only requires all|codex|opencode|pi|vscode|code-server" >&2; exit 1; }
         install_only="$1"
         shift
         continue
@@ -934,9 +951,9 @@ if [[ "$cmd" == "exec" && ${#exec_command[@]} -eq 0 ]]; then
 fi
 
 case "$install_only" in
-  all|codex|opencode|vscode|code-server) ;;
+  all|codex|opencode|pi|vscode|code-server) ;;
   *)
-    echo "Invalid --only value: $install_only (expected all|codex|opencode|vscode|code-server)" >&2
+    echo "Invalid --only value: $install_only (expected all|codex|opencode|pi|vscode|code-server)" >&2
     exit 1
     ;;
 esac

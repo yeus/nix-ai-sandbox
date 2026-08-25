@@ -1,0 +1,4 @@
+interface:
+  display_name: "Critique Decisions"
+  short_description: "Challenge assumptions before and after implementation"
+  default_prompt: "Use $critique-decisions to evaluate this decision candidly before acting."

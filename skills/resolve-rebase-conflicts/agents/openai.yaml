@@ -1,0 +1,4 @@
+interface:
+  display_name: "Resolve Rebase Conflicts"
+  short_description: "Audit and resolve rebases by intent"
+  default_prompt: "Use $resolve-rebase-conflicts to audit this paused rebase, ask me about semantic choices, and resolve only what I approve."
