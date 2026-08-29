@@ -63,7 +63,7 @@ let
 
     if [[ "$#" -gt 0 ]]; then
       case "$1" in
-        start|serve|shell|warm|exec|install|build|logs|doctor-net|reconnect-network|build-base|rebuild|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
+        start|serve|shell|warm|exec|install|build|logs|doctor-net|android-doctor|reconnect-network|build-base|rebuild|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
           exec ${aiSandboxScript}/bin/ai-sandbox "$@"
           ;;
         *)

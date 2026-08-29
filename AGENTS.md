@@ -25,6 +25,24 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
   `apt`/`apt-get` (passwordless sudo wrapper is available for `apt`, `apt-get`,
   and `dpkg` in this image).
 
+## Android test environments
+
+- The generic sandbox image intentionally does not contain Android SDK tools,
+  `adb`, emulator binaries, or emulator system images.
+- Android tooling is opt-in and should come from the active project flake when
+  that project provides it. Do not install or copy a complete Android SDK into
+  the generic image or the Nix store as a workaround.
+- `ai-sandbox start --android` is a controller mode. It connects through the
+  host adb server at `tcp:127.0.0.1:5037` and does not provide KVM or GPU access.
+- `--emulator` is an explicit hardware passthrough mode. It requires KVM and
+  is more sensitive than the normal sandbox; use it only when emulator execution
+  inside the container is necessary.
+- Android commands should remain sandbox-independent: use `adb devices` and
+  the normal test command, rather than adding sandbox-specific test branches.
+- If Android tooling is unavailable, report the missing project dev-shell
+  dependency or use a host-side emulator with controller mode. Do not silently
+  switch to software emulation.
+
 ## User-run host scripts
 
 - For host-specific, privileged, GUI, network, or otherwise

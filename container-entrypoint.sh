@@ -23,6 +23,8 @@ code_server_user_data_dir="${AI_SANDBOX_CODE_SERVER_USER_DATA_DIR:-$HOME/.code-s
 code_server_extensions_dir="${AI_SANDBOX_CODE_SERVER_EXTENSIONS_DIR:-$HOME/.code-server-extensions}"
 code_server_port="${AI_SANDBOX_CODE_SERVER_PORT:-}"
 auto_nix_repair="${AI_SANDBOX_AUTO_NIX_REPAIR:-1}"
+android_mode="${AI_SANDBOX_ANDROID_MODE:-0}"
+emulator_mode="${AI_SANDBOX_EMULATOR_MODE:-0}"
 
 # Child shells launched via `bash -lc` must see these values.
 export vscode_user_data_dir
@@ -45,6 +47,14 @@ mkdir -p \
   "$code_server_user_data_dir" \
   "$code_server_extensions_dir" \
   "$XDG_RUNTIME_DIR"
+
+if [[ "$android_mode" == "1" ]]; then
+  export ADB_SERVER_SOCKET="${ADB_SERVER_SOCKET:-tcp:127.0.0.1:5037}"
+  export ANDROID_USER_HOME="${ANDROID_USER_HOME:-/android-state/user}"
+  export ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-/android-state/avd}"
+  export ANDROID_EMULATOR_HOME="${ANDROID_EMULATOR_HOME:-/android-state/emulator}"
+  mkdir -p "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME" "$ANDROID_EMULATOR_HOME"
+fi
 
 chmod 700 "$XDG_RUNTIME_DIR" || true
 
@@ -638,7 +648,7 @@ discover_flake_from_envrc() {
 }
 
 flake_target=""
-if [[ "$mode" == "start" || "$mode" == "shell" || "$mode" == "warm" || "$mode" == "exec" ]]; then
+if [[ "$mode" == "start" || "$mode" == "shell" || "$mode" == "warm" || "$mode" == "exec" || "$mode" == "android-doctor" ]]; then
   flake_target="$(resolve_flake_target)"
   cd "$workspace"
 fi
@@ -730,6 +740,94 @@ run_nix_develop_with_auto_repair() {
   return "$status"
 }
 
+android_doctor_cmd='
+  set +e
+  overall_status=0
+  echo "AI_SANDBOX_ANDROID_DOCTOR: socket=${ADB_SERVER_SOCKET:-<unset>}"
+
+  if command -v adb >/dev/null 2>&1; then
+    echo "AI_SANDBOX_ANDROID_DOCTOR: adb=available path=$(command -v adb)"
+  else
+    echo "AI_SANDBOX_ANDROID_DOCTOR: adb=missing"
+    echo "AI_SANDBOX_ANDROID_DOCTOR: add platform-tools to the project dev shell."
+    overall_status=1
+  fi
+
+  if (exec 3<>"/dev/tcp/127.0.0.1/5037") >/dev/null 2>&1; then
+    echo "AI_SANDBOX_ANDROID_DOCTOR: adb_server=reachable address=127.0.0.1:5037"
+    if command -v adb >/dev/null 2>&1; then
+      devices_output=$(adb devices 2>&1)
+      adb_status=$?
+      printf "%s\n" "$devices_output"
+      if [[ "$adb_status" -ne 0 ]]; then
+        echo "AI_SANDBOX_ANDROID_DOCTOR: adb_devices=failed status=$adb_status"
+        overall_status=1
+      else
+        device_count=$(printf "%s\n" "$devices_output" | awk "\$2 == \"device\" { count++ } END { print count + 0 }")
+        if [[ "$device_count" -gt 0 ]]; then
+          echo "AI_SANDBOX_ANDROID_DOCTOR: devices=$device_count"
+        else
+          echo "AI_SANDBOX_ANDROID_DOCTOR: devices=none"
+          echo "AI_SANDBOX_ANDROID_DOCTOR: start an emulator or connect a device, then retry."
+          overall_status=2
+        fi
+      fi
+    fi
+  else
+    echo "AI_SANDBOX_ANDROID_DOCTOR: adb_server=unreachable address=127.0.0.1:5037"
+    echo "AI_SANDBOX_ANDROID_DOCTOR: start the host adb server and keep it bound to loopback."
+    overall_status=1
+  fi
+
+  if [[ "${AI_SANDBOX_EMULATOR_MODE:-0}" == "1" ]]; then
+    if [[ -e /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+      echo "AI_SANDBOX_ANDROID_DOCTOR: kvm=device-accessible"
+    else
+      echo "AI_SANDBOX_ANDROID_DOCTOR: kvm=device-unavailable-or-inaccessible"
+      overall_status=1
+    fi
+
+    if command -v emulator >/dev/null 2>&1; then
+      acceleration_output=$(emulator -accel-check 2>&1)
+      acceleration_status=$?
+      printf "%s\n" "$acceleration_output"
+      if [[ "$acceleration_status" -eq 0 ]]; then
+        echo "AI_SANDBOX_ANDROID_DOCTOR: emulator_acceleration=available"
+      else
+        echo "AI_SANDBOX_ANDROID_DOCTOR: emulator_acceleration=unavailable status=$acceleration_status"
+        echo "AI_SANDBOX_ANDROID_DOCTOR: run the emulator headlessly with -no-window -no-audio after fixing KVM."
+        overall_status=1
+      fi
+    else
+      echo "AI_SANDBOX_ANDROID_DOCTOR: emulator=missing"
+      echo "AI_SANDBOX_ANDROID_DOCTOR: add the emulator package to the project dev shell."
+      overall_status=1
+    fi
+  fi
+
+  exit "$overall_status"
+'
+
+run_android_doctor() {
+  local status
+
+  if [[ -n "$flake_target" ]]; then
+    if run_nix_develop_with_auto_repair preserve_stdout_tty \
+      /bin/bash -lc "$android_doctor_cmd" _; then
+      return 0
+    else
+      status=$?
+    fi
+    if [[ "$last_nix_develop_missing_default_devshell" == "1" ]]; then
+      echo "AI_SANDBOX_ANDROID_DOCTOR: no default dev shell is exported by $flake_target." >&2
+      echo "AI_SANDBOX_ANDROID_DOCTOR: expose adb/emulator from the project dev shell." >&2
+    fi
+    return "$status"
+  fi
+
+  /bin/bash -lc "$android_doctor_cmd"
+}
+
 echo "AI_SANDBOX_VSCODE_DIRS: user-data=$vscode_user_data_dir extensions=$vscode_extensions_dir shared-user=$vscode_shared_user_dir"
 echo "AI_SANDBOX_CODE_SERVER_DIRS: user-data=$code_server_user_data_dir extensions=$code_server_extensions_dir"
 
@@ -769,6 +867,10 @@ launch_code_server_cmd='
 '
 
 case "$mode" in
+  android-doctor)
+    run_android_doctor
+    exit $?
+    ;;
   repair)
     echo "AI_SANDBOX: repairing shared /nix store cache..."
     nix-store --verify --check-contents --repair

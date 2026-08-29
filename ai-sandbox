@@ -7,6 +7,7 @@ NIX_STORAGE="${AI_SANDBOX_NIX_STORAGE:-${AI_SANDBOX_NIX_VOLUME:-$HOME/.cache/ai-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_CONTEXT="${AI_SANDBOX_BUILD_CONTEXT:-$SCRIPT_DIR}"
 STATE_DIR="${AI_SANDBOX_STATE_DIR:-$HOME/.local/state/ai-sandbox}"
+ANDROID_STATE_DIR="${AI_SANDBOX_ANDROID_STATE_DIR:-$HOME/.cache/ai-sandbox/android}"
 NETWORK_MODE="${AI_SANDBOX_NETWORK_MODE:-host}"
 
 mkdir -p "$STATE_DIR"
@@ -19,20 +20,20 @@ fi
 usage() {
   cat <<'EOF'
 Usage:
-  ai-sandbox [start] [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--logs] [--auto-reconnect|--no-auto-reconnect] [--auto-reconnect-interval SECONDS]
+  ai-sandbox [start] [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--android|--emulator|--android-emulator] [--android-gpu] [--logs] [--auto-reconnect|--no-auto-reconnect] [--auto-reconnect-interval SECONDS]
     Start (or attach to) the sandbox for a workspace and launch VS Code by default.
 
   ai-sandbox serve [WORKSPACE] [--flake PATH] [--instance NAME] [--port PORT] [--logs]
   ai-sandbox serve [WORKSPACE] [--instance NAME] --stop
     Start or stop browser-based code-server on a stable loopback port.
 
-  ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [-- COMMAND [ARGS...]]
+  ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--android|--emulator|--android-emulator] [--android-gpu] [-- COMMAND [ARGS...]]
     Start/attach the sandbox and open an interactive shell (or run command after --).
 
-  ai-sandbox warm [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME]
+  ai-sandbox warm [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--android|--emulator|--android-emulator] [--android-gpu]
     Pre-start the sandbox container and dependencies without launching VS Code.
 
-  ai-sandbox exec [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] -- COMMAND [ARGS...]
+  ai-sandbox exec [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--android|--emulator|--android-emulator] [--android-gpu] -- COMMAND [ARGS...]
     Run a command inside the sandbox container.
 
   ai-sandbox install [WORKSPACE] [--force] [--only all|codex|opencode|vscode|code-server]
@@ -46,6 +47,9 @@ Usage:
 
   ai-sandbox doctor-net [WORKSPACE]
     Diagnose sandbox networking and connectivity assumptions.
+
+  ai-sandbox android-doctor [WORKSPACE] [--flake PATH] [--emulator]
+    Diagnose adb visibility, connected devices, and optional emulator acceleration.
 
   ai-sandbox reconnect-network [WORKSPACE]
     Reconnect sandbox networking using the configured network mode.
@@ -344,6 +348,40 @@ selinux_mount_label_opt() {
   printf ''
 }
 
+ensure_android_state_dir() {
+  if [[ "$ANDROID_STATE_DIR" != /* ]]; then
+    echo "AI_SANDBOX_ANDROID_STATE_DIR must be an absolute host path." >&2
+    echo "Current Android state path is not a host path: $ANDROID_STATE_DIR" >&2
+    exit 1
+  fi
+
+  mkdir -p \
+    "$ANDROID_STATE_DIR/avd" \
+    "$ANDROID_STATE_DIR/user" \
+    "$ANDROID_STATE_DIR/emulator"
+}
+
+require_emulator_access() {
+  if [[ ! -e /dev/kvm ]]; then
+    echo "In-container emulator mode requires /dev/kvm, but it is unavailable." >&2
+    echo "Use 'ai-sandbox start --android' with an emulator running on the host." >&2
+    echo "Do not fall back to software emulation; it is intentionally not enabled." >&2
+    exit 1
+  fi
+
+  if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+    echo "In-container emulator mode can see /dev/kvm but cannot access it." >&2
+    echo "Add the launching user to the host kvm group, then start again." >&2
+    exit 1
+  fi
+
+  if [[ "$android_gpu" -eq 1 && ! -e /dev/dri ]]; then
+    echo "--android-gpu requested /dev/dri, but /dev/dri is unavailable." >&2
+    echo "Omit --android-gpu for headless emulator operation." >&2
+    exit 1
+  fi
+}
+
 pick_running_container() {
   if [[ -f "$STATE_DIR/last-container" ]]; then
     local c
@@ -361,10 +399,19 @@ pick_running_container() {
 
 pick_running_container_for_workspace() {
   local workspace_path="$1"
+  local profile="${2:-}"
+  local -a filters
+
+  filters=(
+    --filter label=ai-sandbox=true
+    --filter "label=ai-sandbox.workspace=$workspace_path"
+  )
+  if [[ -n "$profile" ]]; then
+    filters+=(--filter "label=ai-sandbox.profile=$profile")
+  fi
 
   podman ps \
-    --filter label=ai-sandbox=true \
-    --filter "label=ai-sandbox.workspace=$workspace_path" \
+    "${filters[@]}" \
     --format '{{.Names}}' | head -n1
 }
 
@@ -736,10 +783,13 @@ sync_path_arg=""
 reset_all_containers=0
 server_port=""
 server_stop=0
+android_mode=0
+emulator_mode=0
+android_gpu=0
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    start|serve|shell|warm|exec|install|build|logs|doctor-net|reconnect-network|build-base|rebuild|reset-container|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
+    start|serve|shell|warm|exec|install|build|logs|doctor-net|android-doctor|reconnect-network|build-base|rebuild|reset-container|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
       cmd="$1"
       shift
       ;;
@@ -826,6 +876,46 @@ while [[ $# -gt 0 ]]; do
       [[ $# -gt 0 ]] || { echo "--network requires host or bridge" >&2; exit 1; }
       NETWORK_MODE="$1"
       shift
+      ;;
+    --android)
+      case "$cmd" in
+        start|shell|warm|exec|android-doctor)
+          android_mode=1
+          shift
+          continue
+          ;;
+        *)
+          echo "--android is only valid with start/shell/warm/exec/android-doctor" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    --emulator|--android-emulator)
+      case "$cmd" in
+        start|shell|warm|exec|android-doctor)
+          android_mode=1
+          emulator_mode=1
+          shift
+          continue
+          ;;
+        *)
+          echo "--emulator/--android-emulator is only valid with start/shell/warm/exec/android-doctor" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    --android-gpu)
+      case "$cmd" in
+        start|shell|warm|exec|android-doctor)
+          android_gpu=1
+          shift
+          continue
+          ;;
+        *)
+          echo "--android-gpu is only valid with start/shell/warm/exec/android-doctor" >&2
+          exit 1
+          ;;
+      esac
       ;;
     --instance)
       shift
@@ -933,6 +1023,10 @@ if [[ "$cmd" == "exec" && ${#exec_command[@]} -eq 0 ]]; then
   exit 2
 fi
 
+if [[ "$cmd" == "android-doctor" ]]; then
+  android_mode=1
+fi
+
 case "$install_only" in
   all|codex|opencode|vscode|code-server) ;;
   *)
@@ -948,6 +1042,16 @@ fi
 
 if [[ "$cmd" == "serve" && "$NETWORK_MODE" != "host" ]]; then
   echo "ai-sandbox serve requires host networking for loopback-only SSH forwarding." >&2
+  exit 1
+fi
+
+if [[ "$android_mode" -eq 1 && "$NETWORK_MODE" != "host" ]]; then
+  echo "Android modes require host networking for 127.0.0.1 adb access." >&2
+  exit 1
+fi
+
+if [[ "$android_gpu" -eq 1 && "$emulator_mode" -ne 1 ]]; then
+  echo "--android-gpu requires --emulator." >&2
   exit 1
 fi
 
@@ -967,6 +1071,14 @@ fi
 if ! [[ "$auto_reconnect_interval" =~ ^[0-9]+$ ]] || [[ "$auto_reconnect_interval" -lt 2 ]]; then
   echo "Invalid --auto-reconnect-interval value: $auto_reconnect_interval (expected integer >= 2)" >&2
   exit 1
+fi
+
+if [[ "$android_mode" -eq 1 ]]; then
+  ensure_android_state_dir
+fi
+
+if [[ "$emulator_mode" -eq 1 && "$cmd" != "android-doctor" ]]; then
+  require_emulator_access
 fi
 
 if [[ "$cmd" == "start" || "$cmd" == "shell" || "$cmd" == "warm" ]]; then
@@ -992,10 +1104,8 @@ case "$cmd" in
     exit 0
     ;;
   rebuild)
-    if podman image exists "$IMAGE"; then
-      podman rmi -f "$IMAGE" >/dev/null
-    fi
-    podman build -t "$IMAGE" -f "$BUILD_CONTEXT/Dockerfile" "$BUILD_CONTEXT"
+    echo "Rebuilding $IMAGE without removing existing containers..."
+    podman build --no-cache -t "$IMAGE" -f "$BUILD_CONTEXT/Dockerfile" "$BUILD_CONTEXT"
     exit 0
     ;;
   logs)
@@ -1094,7 +1204,7 @@ case "$cmd" in
       podman rm -f "${sandbox_containers[@]}" >/dev/null
     fi
 
-    for storage in "$NIX_STORAGE" "$HOME_STORAGE"; do
+    for storage in "$NIX_STORAGE" "$HOME_STORAGE" "$ANDROID_STATE_DIR"; do
       if [[ "$storage" == /* ]]; then
         case "$storage" in
           "/"|"")
@@ -1111,7 +1221,7 @@ case "$cmd" in
       fi
     done
 
-    echo "Reset storage: $NIX_STORAGE, $HOME_STORAGE"
+    echo "Reset storage: $NIX_STORAGE, $HOME_STORAGE, $ANDROID_STATE_DIR"
     exit 0
     ;;
   repair-nix)
@@ -1204,7 +1314,7 @@ case "$cmd" in
 esac
 
 case "$cmd" in
-  start|shell|warm|exec|install|repair-nix)
+  start|shell|warm|exec|install|repair-nix|android-doctor)
     ensure_image_exists
     ;;
   serve)
@@ -1271,8 +1381,22 @@ if [[ "$cmd" == "shell" || "$cmd" == "warm" || "$cmd" == "exec" ]]; then
   launch_context="shell"
 elif [[ "$cmd" == "serve" ]]; then
   launch_context="code-server"
+elif [[ "$cmd" == "android-doctor" ]]; then
+  launch_context="android-doctor"
 fi
+
+runtime_profile="default"
+if [[ "$emulator_mode" -eq 1 ]]; then
+  runtime_profile="emulator"
+  [[ "$android_gpu" -eq 1 ]] && runtime_profile="emulator-gpu"
+elif [[ "$android_mode" -eq 1 ]]; then
+  runtime_profile="android"
+fi
+
 base_container_name="ai-sandbox-${project_slug}-${launch_context}-${workspace_hash}"
+if [[ "$runtime_profile" != "default" ]]; then
+  base_container_name="$base_container_name-$runtime_profile"
+fi
 if [[ -n "$instance_arg" ]]; then
   container_name="$base_container_name-$instance_arg"
 else
@@ -1315,13 +1439,12 @@ theme="$(detect_theme)"
 
 host_dbus_args=()
 x11_args=()
-if [[ "$cmd" != "install" && "$cmd" != "serve" ]]; then
+if [[ "$cmd" != "install" && "$cmd" != "serve" && "$cmd" != "android-doctor" ]]; then
   xauth_file="${XAUTHORITY:-$HOME/.Xauthority}"
   if [[ -n "${DISPLAY:-}" && -d /tmp/.X11-unix ]]; then
     x11_args+=(
       -e "DISPLAY=$DISPLAY"
       -v /tmp/.X11-unix:/tmp/.X11-unix:ro
-      --device /dev/dri
     )
 
     if [[ -f "$xauth_file" ]]; then
@@ -1345,6 +1468,31 @@ fi
 container_mode="$cmd"
 [[ "$cmd" == "serve" ]] && container_mode="server"
 
+android_args=()
+emulator_device_args=()
+if [[ "$android_mode" -eq 1 ]]; then
+  android_args=(
+    -e ADB_SERVER_SOCKET=tcp:127.0.0.1:5037
+    -e AI_SANDBOX_ANDROID_MODE=1
+    -e ANDROID_USER_HOME=/android-state/user
+    -e ANDROID_AVD_HOME=/android-state/avd
+    -e ANDROID_EMULATOR_HOME=/android-state/emulator
+    -v "$ANDROID_STATE_DIR:/android-state${selinux_label_opt}"
+  )
+fi
+
+if [[ "$emulator_mode" -eq 1 ]]; then
+  android_args+=(
+    -e AI_SANDBOX_EMULATOR_MODE=1
+  )
+  if [[ "$cmd" != "android-doctor" || -e /dev/kvm ]]; then
+    emulator_device_args+=(--device=/dev/kvm)
+  fi
+  if [[ "$android_gpu" -eq 1 && ( "$cmd" != "android-doctor" || -e /dev/dri ) ]]; then
+    emulator_device_args+=(--device=/dev/dri)
+  fi
+fi
+
 common_args=(
   --name "$container_name"
   --init
@@ -1355,6 +1503,7 @@ common_args=(
   --label "ai-sandbox.workspace=$workspace"
   --label "ai-sandbox.workspace-hash=$workspace_hash"
   --label "ai-sandbox.instance=$instance_arg"
+  --label "ai-sandbox.profile=$runtime_profile"
   -e HOME=/sandbox-home
   -e CODEX_HOME=/sandbox-home/.codex
   -e XDG_RUNTIME_DIR=/tmp/xdg-runtime
@@ -1376,6 +1525,8 @@ common_args=(
   -v "$mount_root:/workspace${selinux_label_opt}"
   -v "$home_mount_spec"
   -v "$nix_mount_spec"
+  "${android_args[@]}"
+  "${emulator_device_args[@]}"
   "${x11_args[@]}"
 )
 
@@ -1383,6 +1534,15 @@ network_args=()
 if [[ "$NETWORK_MODE" == "host" ]]; then
   network_args=(--network host)
 fi
+
+run_android_doctor() {
+  echo "Running Android diagnostics in a temporary sandbox..."
+  exec podman run --rm -it \
+    "${common_args[@]}" \
+    "${network_args[@]}" \
+    "${host_dbus_args[@]}" \
+    "$IMAGE"
+}
 
 run_detached() {
   local mode existing_state
@@ -1451,7 +1611,7 @@ run_shell() {
 run_exec() {
   local existing_container existing_workspace existing_state
 
-  existing_container="$(pick_running_container_for_workspace "$workspace" || true)"
+  existing_container="$(pick_running_container_for_workspace "$workspace" "$runtime_profile" || true)"
   if [[ -n "$existing_container" ]]; then
     echo "Reusing running sandbox container $existing_container..."
     if [[ "$auto_reconnect" == "1" ]]; then
@@ -1542,6 +1702,7 @@ case "$cmd" in
   shell) run_shell ;;
   warm) run_interactive ;;
   exec) run_exec ;;
+  android-doctor) run_android_doctor ;;
   install) run_install ;;
   *) usage >&2; exit 1 ;;
 esac

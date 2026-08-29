@@ -98,11 +98,17 @@ ai-sandbox install . --only vscode
 Inside sandbox terminals, `apt-get` and `apt` are available directly. They are
 wrapped to run with root privileges for package-management commands.
 
-Rebuild the base image from scratch (remove old image tag first, keep storage dirs):
+Rebuild the base image without removing existing containers or storage:
 
 ```bash
 ai-sandbox rebuild
 ```
+
+The rebuild uses `--no-cache` and only replaces the image tag after a
+successful build. A running sandbox keeps using its already-created image, so
+agents can continue working while the rebuild runs. Remove and recreate a
+container explicitly with `ai-sandbox reset-container` when you are ready for
+it to use the new image.
 
 Remove persistent sandbox containers (keep home/nix storage):
 
@@ -295,6 +301,179 @@ Diagnose or repair an already running sandbox after host network changes:
 ai-sandbox doctor-net .
 ai-sandbox reconnect-network .
 ```
+
+## Android testing
+
+Android support is opt-in. The generic image remains free of Android SDK
+files, `adb`, emulator binaries, and system images. A project that needs
+Android testing should expose its Android tools from its own `nix develop`
+shell. The shell should provide `platform-tools` for controller mode and the
+emulator plus its platform and system image for in-container mode.
+
+The canonical in-container flag is `--emulator`; `--android-emulator` is
+accepted as a long-form alias.
+
+The project flake can use the current nixpkgs Android API, including
+`composeAndroidPackages` with `includeEmulator = true` where that option is
+available. SDK files should remain managed by that flake; do not copy them into
+the Nix store manually.
+
+For an `x86_64-linux` project, the package definition can be shaped like this
+inside that project’s own flake:
+
+```nix
+let
+  androidComposition = pkgs.androidenv.composeAndroidPackages {
+    platformVersions = [ "35" ];
+    includeSystemImages = true;
+    systemImageTypes = [ "google_apis" ];
+    abiVersions = [ "x86_64" ];
+    includeEmulator = true;
+  };
+in
+pkgs.mkShell {
+  packages = [
+    androidComposition.platform-tools
+    androidComposition.emulator
+    androidComposition.androidsdk
+  ];
+}
+```
+
+Choose a platform version available in the pinned nixpkgs revision. If that
+revision uses the conditional form, use `includeEmulator = "if-supported"` and
+keep the shell on `x86_64-linux` for the emulator.
+
+### Host-side emulator (recommended)
+
+Run the emulator on the NixOS/Linux host. Start the host adb server yourself
+and keep it on loopback:
+
+```bash
+adb start-server
+ss -ltn | grep 127.0.0.1:5037
+adb devices
+```
+
+Start an emulator with a graphical window if desired, or use the headless
+configuration for adb-based tests:
+
+```bash
+emulator -avd <avd-name> \
+  -no-window -no-audio -no-boot-anim
+```
+
+The adb server must not be started with an all-interface bind such as
+`adb -a`. The sandbox never publishes adb, starts a host adb server, or asks
+Podman to expose port 5037.
+
+Start the controller sandbox with host networking:
+
+```bash
+ai-sandbox start . --android
+```
+
+The same adb-enabled shell is available for test commands:
+
+```bash
+ai-sandbox shell . --android
+ai-sandbox exec . --android -- adb devices
+```
+
+Inside this mode, adb receives:
+
+```text
+ADB_SERVER_SOCKET=tcp:127.0.0.1:5037
+```
+
+Host networking is required because `127.0.0.1` must refer to the host adb
+server. This mode does not pass KVM, `/dev/dri`, or any other emulator device.
+It can still start when the project shell does not provide `adb`; the Android
+diagnostic command reports that missing dependency when requested.
+
+Check the complete controller path with:
+
+```bash
+ai-sandbox android-doctor .
+```
+
+The command runs in a temporary sandbox and reports the project-shell adb
+path, host adb reachability, and visible devices. It exits nonzero when adb,
+the server, or a device is unavailable.
+
+### In-container emulator (explicit hardware mode)
+
+Use this only when the emulator itself must run inside Podman. The host must
+provide an accessible KVM device:
+
+```bash
+test -e /dev/kvm
+ai-sandbox android-doctor . --emulator
+```
+
+The equivalent long-form spelling is:
+
+```bash
+ai-sandbox android-doctor . --android-emulator
+```
+
+If `/dev/kvm` is unavailable, the launcher exits without starting Podman and
+explains how to use `--android` with a host emulator. It does not silently use
+slow software emulation.
+
+The launcher passes only `/dev/kvm` and the existing keep-groups setting:
+
+```text
+--device=/dev/kvm
+--group-add=keep-groups
+```
+
+It never uses `--privileged` and never mounts the host `/dev` directory. Add
+GPU access only when explicitly needed:
+
+```bash
+ai-sandbox shell . --emulator \
+  --android-gpu -- emulator -avd <avd-name> \
+  -no-window -no-audio -no-boot-anim
+```
+
+`--android-gpu` adds `/dev/dri`; it is rejected unless `--emulator` is also
+present. Headless operation does not need Wayland, X11, or `/dev/dri`.
+
+The emulator mode itself enables the permissions and environment; it does not
+choose an AVD or start a long-running emulator automatically. Start it from an
+Android-enabled shell or command as shown above, then run the normal test
+command in another Android-enabled shell.
+
+### Persistent Android state
+
+Android writable state is stored on the host at:
+
+```text
+~/.cache/ai-sandbox/android
+```
+
+Override it with `AI_SANDBOX_ANDROID_STATE_DIR` and use an absolute host path.
+The container mounts this directory at `/android-state` and sets:
+
+```text
+ANDROID_USER_HOME=/android-state/user
+ANDROID_AVD_HOME=/android-state/avd
+ANDROID_EMULATOR_HOME=/android-state/emulator
+```
+
+The SDK binaries and system image remain supplied by the project flake; the
+cache stores writable user metadata and AVD state. `ai-sandbox reset-storage`
+also removes this Android state directory.
+
+### KVM and security
+
+KVM passthrough gives a container access to the host virtualization device.
+That is materially more sensitive than the normal sandbox and should remain
+an explicit choice. The launcher requires `/dev/kvm`, preserves the host
+supplementary groups needed for access, and passes no broad privilege flag.
+GPU access is a separate explicit choice. Prefer the host-emulator controller
+mode whenever the emulator does not need to run inside the container.
 
 ## Typical usage
 
