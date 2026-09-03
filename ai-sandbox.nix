@@ -169,7 +169,7 @@ in
       aiSandboxLaunchEditorScript
       aiSandboxUrlHandler
       pkgs.podman
-      pkgs.xorg.xhost
+      pkgs.xhost
     ];
 
     xdg.desktopEntries.ai-sandbox-vscode-url-handler = {
