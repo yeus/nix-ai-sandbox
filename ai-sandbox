@@ -641,12 +641,19 @@ container_network_mode() {
 
 probe_container_dns() {
   local container="$1"
-  podman exec "$container" /bin/bash -lc 'getent hosts api.openai.com >/dev/null 2>&1'
+  podman exec "$container" /bin/bash -lc \
+    'timeout 3s getent hosts api.openai.com >/dev/null 2>&1'
 }
 
 probe_container_https_ip() {
   local container="$1"
-  podman exec "$container" /bin/bash -lc 'curl -fsS --max-time 6 https://1.1.1.1 >/dev/null 2>&1'
+  podman exec "$container" /bin/bash -lc \
+    'curl -fsS --connect-timeout 3 --max-time 6 https://1.1.1.1 >/dev/null 2>&1'
+}
+
+container_connectivity_healthy() {
+  local container="$1"
+  probe_container_dns "$container" && probe_container_https_ip "$container"
 }
 
 sync_container_resolver_from_host() {
@@ -675,19 +682,8 @@ reconnect_container_network() {
   fi
 
   mode="$(container_network_mode "$container")"
-  dns_before="fail"
-  ip_before="fail"
   dns_after="fail"
   ip_after="fail"
-
-  if probe_container_dns "$container"; then
-    dns_before="ok"
-  fi
-  if probe_container_https_ip "$container"; then
-    ip_before="ok"
-  fi
-
-  echo "AI_SANDBOX_NET[$source]: precheck container=$container mode=$mode dns=$dns_before ip=$ip_before"
 
   if [[ "$mode" == "host" ]]; then
     if sync_container_resolver_from_host "$container"; then
@@ -696,6 +692,15 @@ reconnect_container_network() {
       echo "AI_SANDBOX_NET[$source]: resolver sync failed (continuing with probes)" >&2
     fi
   else
+    dns_before="fail"
+    ip_before="fail"
+    if probe_container_dns "$container"; then
+      dns_before="ok"
+    fi
+    if probe_container_https_ip "$container"; then
+      ip_before="ok"
+    fi
+    echo "AI_SANDBOX_NET[$source]: precheck container=$container mode=$mode dns=$dns_before ip=$ip_before"
     echo "AI_SANDBOX_NET[$source]: skipping resolver sync in bridge mode"
   fi
 
@@ -749,8 +754,11 @@ maybe_start_auto_reconnect_watcher() {
       if [[ "$current_fp" != "$prev_fp" ]]; then
         echo "AI_SANDBOX_NET[watcher]: host network fingerprint changed; reconnecting..."
         reconnect_container_network "$container" "auto" || true
-        prev_fp="$current_fp"
+      elif ! container_connectivity_healthy "$container"; then
+        echo "AI_SANDBOX_NET[watcher]: container connectivity probe failed; reconnecting..."
+        reconnect_container_network "$container" "auto" || true
       fi
+      prev_fp="$current_fp"
     done
 
     echo "AI_SANDBOX_NET[watcher]: stopping for $container"
