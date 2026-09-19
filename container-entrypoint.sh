@@ -531,6 +531,14 @@ EOF
 
 seed_nix_if_needed
 repair_nix_command_symlinks
+
+if [[ "$mode" == "gc" ]]; then
+  echo "AI_SANDBOX: collecting unreferenced Nix store paths..."
+  nix-collect-garbage -d
+  echo "AI_SANDBOX: Nix store garbage collection completed."
+  exit 0
+fi
+
 link_shared_vscode_user_files
 ensure_default_vscode_settings
 ensure_ai_shell_prompt_files

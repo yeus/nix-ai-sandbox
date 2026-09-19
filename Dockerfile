@@ -1,5 +1,7 @@
 FROM docker.io/library/ubuntu:24.04
 
+LABEL ai-sandbox=true
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NIX_INSTALLER_NO_CONFIRM=1
 

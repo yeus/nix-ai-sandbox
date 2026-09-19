@@ -63,6 +63,10 @@ Usage:
   ai-sandbox repair-nix
     Attempt targeted repair steps for broken Nix state in the sandbox.
 
+  ai-sandbox prune [--force]
+    Remove stopped sandbox containers, old sandbox images, and unreferenced Nix store paths.
+    Use --force to stop and remove running sandbox containers first.
+
   ai-sandbox agents pull|push [--file PATH] [--force]
     Sync AGENTS.md between global Codex home and a project file.
 
@@ -249,6 +253,118 @@ ensure_image_exists() {
   fi
   echo "Image '$IMAGE' not found locally. Building from $BUILD_CONTEXT..." >&2
   podman build -t "$IMAGE" -f "$BUILD_CONTEXT/Dockerfile" "$BUILD_CONTEXT"
+}
+
+storage_mount_spec() {
+  local storage="$1"
+  local target="$2"
+  local selinux_label_opt="$3"
+
+  if [[ "$storage" == /* ]]; then
+    mkdir -p "$storage"
+    printf '%s:%s%s\n' "$storage" "$target" "$selinux_label_opt"
+  else
+    printf '%s:%s%s,U\n' "$storage" "$target" "$selinux_label_opt"
+  fi
+}
+
+require_safe_storage_path() {
+  local storage_name="$1"
+  local storage_path="$2"
+
+  case "$storage_path" in
+    ""|"/")
+      echo "Refusing to prune unsafe $storage_name path: $storage_path" >&2
+      return 1
+      ;;
+  esac
+}
+
+run_nix_gc() {
+  local home_mount_spec nix_mount_spec selinux_label_opt
+  selinux_label_opt="$(selinux_mount_label_opt)"
+  home_mount_spec="$(storage_mount_spec "$HOME_STORAGE" /sandbox-home "$selinux_label_opt")"
+  nix_mount_spec="$(storage_mount_spec "$NIX_STORAGE" /nix "$selinux_label_opt")"
+
+  echo "Collecting unreferenced paths from the shared ai-sandbox Nix store..."
+  podman run --rm \
+    --userns=keep-id \
+    --user "$(id -u):$(id -g)" \
+    --group-add keep-groups \
+    -e HOME=/sandbox-home \
+    -e XDG_RUNTIME_DIR=/tmp/xdg-runtime \
+    -e AI_SANDBOX_MODE=gc \
+    -v "$home_mount_spec" \
+    -v "$nix_mount_spec" \
+    "$IMAGE"
+}
+
+prune_legacy_images() {
+  local image_id image_name image_names
+  local -a legacy_image_ids=()
+
+  while IFS= read -r image_id; do
+    [[ -n "$image_id" ]] || continue
+    image_names="$(podman image inspect \
+      --format '{{range .NamesHistory}}{{println .}}{{end}}' \
+      "$image_id" 2>/dev/null || true)"
+    while IFS= read -r image_name; do
+      case "$image_name" in
+        "$IMAGE"|"$IMAGE":*)
+          legacy_image_ids+=("$image_id")
+          break
+          ;;
+      esac
+    done <<< "$image_names"
+  done < <(
+    podman images --all \
+      --filter dangling=true \
+      --no-trunc \
+      --format '{{.ID}}'
+  )
+
+  for image_id in "${legacy_image_ids[@]}"; do
+    echo "Removing legacy ai-sandbox image: $image_id"
+    podman image rm "$image_id" >/dev/null 2>&1 || true
+  done
+}
+
+run_prune() {
+  local -a running_containers sandbox_containers
+
+  require_safe_storage_path "HOME" "$HOME_STORAGE"
+  require_safe_storage_path "Nix" "$NIX_STORAGE"
+
+  mapfile -t running_containers < <(
+    podman ps --filter label=ai-sandbox=true --format '{{.Names}}'
+  )
+  if [[ ${#running_containers[@]} -gt 0 && "$prune_force" -ne 1 ]]; then
+    echo "Running ai-sandbox containers found: ${running_containers[*]}" >&2
+    echo "Stop them first, or rerun 'ai-sandbox prune --force' to remove them." >&2
+    return 2
+  fi
+
+  mapfile -t sandbox_containers < <(
+    podman ps -aq --filter label=ai-sandbox=true --format '{{.Names}}'
+  )
+  if [[ ${#sandbox_containers[@]} -gt 0 ]]; then
+    if [[ "$prune_force" -eq 1 ]]; then
+      podman rm -f "${sandbox_containers[@]}" >/dev/null
+    else
+      podman rm "${sandbox_containers[@]}" >/dev/null
+    fi
+    echo "Removed sandbox containers: ${sandbox_containers[*]}"
+  else
+    echo "No sandbox containers to remove."
+  fi
+
+  ensure_image_exists
+  run_nix_gc
+
+  prune_legacy_images
+  echo "Removing unused images labeled ai-sandbox=true..."
+  podman image prune --force --filter label=ai-sandbox=true
+  echo "AI sandbox prune complete."
 }
 
 follow_startup_logs_until_vscode() {
@@ -789,6 +905,7 @@ auto_reconnect_interval="${AI_SANDBOX_AUTO_RECONNECT_INTERVAL:-8}"
 sync_mode=""
 sync_path_arg=""
 reset_all_containers=0
+prune_force=0
 server_port=""
 server_stop=0
 android_mode=0
@@ -797,7 +914,7 @@ android_gpu=0
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    start|serve|shell|warm|exec|install|build|logs|doctor-net|android-doctor|reconnect-network|build-base|rebuild|reset-container|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
+    start|serve|shell|warm|exec|install|build|logs|doctor-net|android-doctor|reconnect-network|build-base|rebuild|reset-container|reset-storage|reset-volumes|repair-nix|prune|agents|skills|open-url|open-in-editor|help|-h|--help)
       cmd="$1"
       shift
       ;;
@@ -836,8 +953,12 @@ while [[ $# -gt 0 ]]; do
         install_force=1
         shift
         continue
+      elif [[ "$cmd" == "prune" ]]; then
+        prune_force=1
+        shift
+        continue
       fi
-      echo "--force is only valid with install/build/agents/skills" >&2
+      echo "--force is only valid with install/build/agents/skills/prune" >&2
       exit 1
       ;;
     --file)
@@ -1233,33 +1354,25 @@ case "$cmd" in
     exit 0
     ;;
   repair-nix)
-    home_mount_spec=""
-    nix_mount_spec=""
     selinux_label_opt="$(selinux_mount_label_opt)"
-    if [[ "$HOME_STORAGE" == /* ]]; then
-      mkdir -p "$HOME_STORAGE"
-      home_mount_spec="$HOME_STORAGE:/sandbox-home${selinux_label_opt}"
-    else
-      home_mount_spec="$HOME_STORAGE:/sandbox-home${selinux_label_opt},U"
-    fi
-
-    if [[ "$NIX_STORAGE" == /* ]]; then
-      mkdir -p "$NIX_STORAGE"
-      nix_mount_spec="$NIX_STORAGE:/nix${selinux_label_opt}"
-    else
-      nix_mount_spec="$NIX_STORAGE:/nix${selinux_label_opt},U"
-    fi
+    home_mount_spec="$(storage_mount_spec "$HOME_STORAGE" /sandbox-home "$selinux_label_opt")"
+    nix_mount_spec="$(storage_mount_spec "$NIX_STORAGE" /nix "$selinux_label_opt")"
 
     exec podman run --rm -it \
       --userns=keep-id \
       --user "$(id -u):$(id -g)" \
       --group-add keep-groups \
+      --label ai-sandbox=true \
       -e HOME=/sandbox-home \
       -e XDG_RUNTIME_DIR=/tmp/xdg-runtime \
       -e AI_SANDBOX_MODE=repair \
       -v "$home_mount_spec" \
       -v "$nix_mount_spec" \
       "$IMAGE"
+    ;;
+  prune)
+    run_prune
+    exit $?
     ;;
   agents)
     [[ -n "$sync_mode" ]] || { echo "agents requires pull, push, reset, or clear" >&2; exit 1; }

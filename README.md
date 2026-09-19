@@ -129,6 +129,27 @@ Repair shared ai-sandbox Nix cache in place (verify/repair store paths, no delet
 ai-sandbox repair-nix
 ```
 
+Prune stopped sandbox containers, unused ai-sandbox image layers, and old
+unreferenced paths from the shared Nix store:
+
+```bash
+ai-sandbox prune
+```
+
+If a sandbox is still running, prune stops with no changes. To explicitly stop
+and remove all ai-sandbox containers before garbage collection, use:
+
+```bash
+ai-sandbox prune --force
+```
+
+The current tagged image and sandbox home are kept. Image pruning is limited to
+unused images labeled `ai-sandbox=true`, plus legacy dangling images whose
+recorded Podman name matches the configured sandbox image.
+
+Run pruning from the host shell where Podman is available. The sandbox itself
+does not expose the host Podman socket or the host storage paths.
+
 Sync global Codex instructions (sandbox-wide, not project-local):
 
 ```bash
