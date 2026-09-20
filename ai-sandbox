@@ -65,7 +65,7 @@ Usage:
 
   ai-sandbox prune [--force]
     Remove stopped sandbox containers, old sandbox images, and unreferenced Nix store paths.
-    Use --force to stop and remove running sandbox containers first.
+    Running containers are kept unless --force is used; Nix/image cleanup still runs.
 
   ai-sandbox agents pull|push [--file PATH] [--force]
     Sync AGENTS.md between global Codex home and a project file.
@@ -330,6 +330,7 @@ prune_legacy_images() {
 }
 
 run_prune() {
+  local containers_skipped=0
   local -a running_containers sandbox_containers
 
   require_safe_storage_path "HOME" "$HOME_STORAGE"
@@ -340,22 +341,22 @@ run_prune() {
   )
   if [[ ${#running_containers[@]} -gt 0 && "$prune_force" -ne 1 ]]; then
     echo "Running ai-sandbox containers found: ${running_containers[*]}" >&2
-    echo "Stop them first, or rerun 'ai-sandbox prune --force' to remove them." >&2
-    return 2
-  fi
-
-  mapfile -t sandbox_containers < <(
-    podman ps -aq --filter label=ai-sandbox=true --format '{{.Names}}'
-  )
-  if [[ ${#sandbox_containers[@]} -gt 0 ]]; then
-    if [[ "$prune_force" -eq 1 ]]; then
-      podman rm -f "${sandbox_containers[@]}" >/dev/null
-    else
-      podman rm "${sandbox_containers[@]}" >/dev/null
-    fi
-    echo "Removed sandbox containers: ${sandbox_containers[*]}"
+    echo "Leaving them running; continuing with Nix GC and image cleanup." >&2
+    containers_skipped=1
   else
-    echo "No sandbox containers to remove."
+    mapfile -t sandbox_containers < <(
+      podman ps -aq --filter label=ai-sandbox=true --format '{{.Names}}'
+    )
+    if [[ ${#sandbox_containers[@]} -gt 0 ]]; then
+      if [[ "$prune_force" -eq 1 ]]; then
+        podman rm -f "${sandbox_containers[@]}" >/dev/null
+      else
+        podman rm "${sandbox_containers[@]}" >/dev/null
+      fi
+      echo "Removed sandbox containers: ${sandbox_containers[*]}"
+    else
+      echo "No sandbox containers to remove."
+    fi
   fi
 
   ensure_image_exists
@@ -364,7 +365,11 @@ run_prune() {
   prune_legacy_images
   echo "Removing unused images labeled ai-sandbox=true..."
   podman image prune --force --filter label=ai-sandbox=true
-  echo "AI sandbox prune complete."
+  if [[ "$containers_skipped" -eq 1 ]]; then
+    echo "AI sandbox prune complete; running containers were kept."
+  else
+    echo "AI sandbox prune complete."
+  fi
 }
 
 follow_startup_logs_until_vscode() {

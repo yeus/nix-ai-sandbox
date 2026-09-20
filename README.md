@@ -136,12 +136,16 @@ unreferenced paths from the shared Nix store:
 ai-sandbox prune
 ```
 
-If a sandbox is still running, prune stops with no changes. To explicitly stop
-and remove all ai-sandbox containers before garbage collection, use:
+If a sandbox is still running, its container is kept while Nix and image cleanup
+continues. To explicitly stop and remove all ai-sandbox containers before
+garbage collection, use:
 
 ```bash
 ai-sandbox prune --force
 ```
+
+Running cleanup while containers remain active can keep some paths rooted; use
+`--force` when you want the most complete and isolated collection pass.
 
 The current tagged image and sandbox home are kept. Image pruning is limited to
 unused images labeled `ai-sandbox=true`, plus legacy dangling images whose

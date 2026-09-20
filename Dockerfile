@@ -91,7 +91,8 @@ RUN ln -sf /nix/var/nix/profiles/default/bin/nix /usr/local/bin/nix && \
     [ ! -e /nix/var/nix/profiles/default/bin/nix-env ] || ln -sf /nix/var/nix/profiles/default/bin/nix-env /usr/local/bin/nix-env && \
     [ ! -e /nix/var/nix/profiles/default/bin/nix-store ] || ln -sf /nix/var/nix/profiles/default/bin/nix-store /usr/local/bin/nix-store && \
     [ ! -e /nix/var/nix/profiles/default/bin/nix-shell ] || ln -sf /nix/var/nix/profiles/default/bin/nix-shell /usr/local/bin/nix-shell && \
-    [ ! -e /nix/var/nix/profiles/default/bin/nix-instantiate ] || ln -sf /nix/var/nix/profiles/default/bin/nix-instantiate /usr/local/bin/nix-instantiate
+    [ ! -e /nix/var/nix/profiles/default/bin/nix-instantiate ] || ln -sf /nix/var/nix/profiles/default/bin/nix-instantiate /usr/local/bin/nix-instantiate && \
+    [ ! -e /nix/var/nix/profiles/default/bin/nix-collect-garbage ] || ln -sf /nix/var/nix/profiles/default/bin/nix-collect-garbage /usr/local/bin/nix-collect-garbage
 
 RUN mkdir -p /nix-seed \
     && rsync -a \

@@ -286,17 +286,21 @@ find_nix_bin_dir() {
     "/nix/var/nix/profiles/default/bin" \
     "/nix/var/nix/profiles/per-user/dev/profile/bin" \
     "/nix/var/nix/profiles/per-user/${USER}/profile/bin" \
+    "$HOME/.local/bin" \
     "$HOME/.nix-profile/bin" \
     "/home/dev/.nix-profile/bin" \
     "/root/.nix-profile/bin"
   do
-    if [[ -x "$candidate/nix" ]]; then
+    if [[ -x "$candidate/nix" && -x "$candidate/nix-collect-garbage" ]]; then
       echo "$candidate"
       return 0
     fi
   done
 
-  candidate="$(find /nix/store -maxdepth 3 -type f -path '*/bin/nix' 2>/dev/null | head -n1 || true)"
+  candidate="$(find /nix/store -maxdepth 3 \
+    -path '*/bin/nix-collect-garbage' \
+    \( -type f -o -type l \) \
+    -print -quit 2>/dev/null || true)"
   if [[ -n "$candidate" ]]; then
     dirname "$candidate"
     return 0
@@ -308,10 +312,6 @@ find_nix_bin_dir() {
 repair_nix_command_symlinks() {
   local nix_bin_dir cmd target_dir
 
-  if command -v nix >/dev/null 2>&1; then
-    return
-  fi
-
   if ! nix_bin_dir="$(find_nix_bin_dir)"; then
     return
   fi
@@ -319,7 +319,7 @@ repair_nix_command_symlinks() {
   target_dir="$HOME/.local/bin"
   mkdir -p "$target_dir"
 
-  for cmd in nix nix-store nix-env nix-shell nix-instantiate; do
+  for cmd in nix nix-store nix-env nix-shell nix-instantiate nix-collect-garbage; do
     if [[ -x "$nix_bin_dir/$cmd" ]]; then
       ln -sfn "$nix_bin_dir/$cmd" "$target_dir/$cmd"
     fi
@@ -330,6 +330,23 @@ repair_nix_command_symlinks() {
     export PATH
   fi
   hash -r
+}
+
+run_nix_garbage_collection() {
+  local nix_bin_dir nix_collect_garbage
+
+  nix_collect_garbage="$(command -v nix-collect-garbage 2>/dev/null || true)"
+  if [[ ! -x "$nix_collect_garbage" ]]; then
+    nix_bin_dir="$(find_nix_bin_dir || true)"
+    nix_collect_garbage="$nix_bin_dir/nix-collect-garbage"
+  fi
+
+  if [[ ! -x "$nix_collect_garbage" ]]; then
+    echo "AI_SANDBOX: nix-collect-garbage is unavailable in the shared Nix store." >&2
+    return 127
+  fi
+
+  "$nix_collect_garbage" -d
 }
 
 ensure_default_vscode_settings() {
@@ -534,7 +551,7 @@ repair_nix_command_symlinks
 
 if [[ "$mode" == "gc" ]]; then
   echo "AI_SANDBOX: collecting unreferenced Nix store paths..."
-  nix-collect-garbage -d
+  run_nix_garbage_collection
   echo "AI_SANDBOX: Nix store garbage collection completed."
   exit 0
 fi
