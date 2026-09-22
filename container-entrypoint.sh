@@ -892,6 +892,9 @@ launch_code_server_cmd='
 '
 
 case "$mode" in
+  idle)
+    exec sleep infinity
+    ;;
   android-doctor)
     run_android_doctor
     exit $?

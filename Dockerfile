@@ -112,6 +112,10 @@ COPY ai-sandbox-vscode-update.sh /usr/local/bin/ai-sandbox-vscode-update
 COPY ai-sandbox-code-server-update.sh /usr/local/bin/ai-sandbox-code-server-update
 COPY ai-sandbox-user-code.sh /usr/local/bin/ai-sandbox-user-code
 COPY ai-sandbox-default-install.sh /usr/local/bin/ai-sandbox-default-install
+COPY mcp/install.sh /usr/local/bin/ai-sandbox-mcp-install
+COPY mcp/launch.sh /usr/local/bin/ai-sandbox-mcp-launch
+COPY mcp/status.sh /usr/local/bin/ai-sandbox-mcp-status
+COPY mcp/stop.sh /usr/local/bin/ai-sandbox-mcp-stop
 COPY AGENTS.md /usr/local/share/ai-sandbox/default-AGENTS.md
 
 RUN chmod +x \
@@ -122,6 +126,10 @@ RUN chmod +x \
     /usr/local/bin/ai-sandbox-code-server-update \
     /usr/local/bin/ai-sandbox-user-code \
     /usr/local/bin/ai-sandbox-default-install \
+    /usr/local/bin/ai-sandbox-mcp-install \
+    /usr/local/bin/ai-sandbox-mcp-launch \
+    /usr/local/bin/ai-sandbox-mcp-status \
+    /usr/local/bin/ai-sandbox-mcp-stop \
     && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/local/bin/xdg-open \
     && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/bin/xdg-open \
     && ln -sf /usr/local/bin/ai-sandbox-user-code /usr/local/bin/code

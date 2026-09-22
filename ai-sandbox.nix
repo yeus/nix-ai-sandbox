@@ -13,6 +13,7 @@ let
     cp ${./ai-sandbox-code-server-update.sh} "$out/ai-sandbox-code-server-update.sh"
     cp ${./ai-sandbox-user-code.sh} "$out/ai-sandbox-user-code.sh"
     cp ${./ai-sandbox-default-install.sh} "$out/ai-sandbox-default-install.sh"
+    cp -r ${./mcp} "$out/mcp"
     cp ${./AGENTS.md} "$out/AGENTS.md"
     chmod 0644 \
       "$out/Dockerfile" \
@@ -24,6 +25,7 @@ let
       "$out/ai-sandbox-user-code.sh" \
       "$out/ai-sandbox-default-install.sh" \
       "$out/AGENTS.md"
+    chmod 0755 "$out/mcp/"*.sh
   '';
 
   aiSandboxScript = pkgs.writeShellScriptBin "ai-sandbox" ''
@@ -33,6 +35,7 @@ let
     export AI_SANDBOX_BUILD_CONTEXT=${lib.escapeShellArg aiSandboxFiles}
     export AI_SANDBOX_STATE_DIR=${lib.escapeShellArg cfg.stateDir}
     export AI_SANDBOX_NETWORK_MODE=${lib.escapeShellArg cfg.networkMode}
+    export AI_SANDBOX_MCP_LIB_DIR=${lib.escapeShellArg "${aiSandboxFiles}/mcp"}
     export PATH=${lib.makeBinPath [
       pkgs.podman
       pkgs.coreutils
@@ -44,6 +47,7 @@ let
       pkgs.gnused
       pkgs.procps
       pkgs.curl
+      pkgs.jq
     ]}:$PATH
 
     exec ${./ai-sandbox} "$@"
@@ -63,7 +67,7 @@ let
 
     if [[ "$#" -gt 0 ]]; then
       case "$1" in
-        start|serve|shell|warm|exec|install|build|logs|doctor-net|android-doctor|reconnect-network|build-base|rebuild|reset-storage|reset-volumes|repair-nix|prune|agents|skills|open-url|open-in-editor|help|-h|--help)
+        start|serve|mcp|shell|warm|exec|install|build|logs|doctor-net|android-doctor|reconnect-network|build-base|rebuild|reset-storage|reset-volumes|repair-nix|prune|agents|skills|open-url|open-in-editor|help|-h|--help)
           exec ${aiSandboxScript}/bin/ai-sandbox "$@"
           ;;
         *)

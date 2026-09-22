@@ -248,6 +248,55 @@ Browser-editor profiles and extensions are separate from desktop VS Code
 profiles because code-server extension compatibility differs. Repository
 `.vscode` configuration remains shared through the workspace mount.
 
+## Local workspace MCP
+
+Start policy-controlled MCP access for the current repository:
+
+```bash
+cd ~/git/my-project
+ais mcp
+```
+
+The server runs inside a persistent sandbox workspace container and exposes one
+repository with the ID `workspace`. Its repository root is exactly
+`/workspace`. The HTTP endpoint listens on host loopback and defaults to
+`write` mode.
+
+Choose a narrower read-only policy or explicitly enable reviewed local Git
+completion operations:
+
+```bash
+ais mcp --read-only
+ais mcp --ship
+ais mcp --local
+```
+
+Inspect or stop the MCP process without stopping its sandbox container:
+
+```bash
+ais mcp --status
+ais mcp --status --json
+ais mcp --stop
+```
+
+Choose a port when starting a stopped service:
+
+```bash
+ais mcp --port 8787
+```
+
+The assigned port remains stable for the workspace. A requested port collision
+is reported without stopping the process that owns the port. Changing the mode
+or port requires `ais mcp --stop` first.
+
+Installation, generated configuration, logs, and upstream `.chatgpt` working
+artifacts stay in persistent sandbox storage. No MCP configuration is added to
+the project. Submodule workspaces whose normal sandbox mount includes a parent
+repository are rejected; start MCP from the mounted top-level repository.
+
+The current implementation dependency is a pinned `gpt-repo-mcp` revision.
+The `ais mcp` command and local HTTP boundary are the supported interface.
+
 Open an interactive shell in the sandbox:
 
 ```bash
