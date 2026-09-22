@@ -30,7 +30,7 @@ Usage:
   ai-sandbox serve [WORKSPACE] [--instance NAME] --stop
     Start or stop browser-based code-server on a stable loopback port.
 
-  ai-sandbox mcp [WORKSPACE] [--read-only|--ship] [--local] [--port PORT]
+  ai-sandbox mcp [WORKSPACE] [--read-only|--ship] [--local|--tunnel TUNNEL_ID] [--port PORT]
   ai-sandbox mcp [WORKSPACE] --status [--json]
   ai-sandbox mcp [WORKSPACE] --stop [--json]
     Start, inspect, or stop policy-controlled local HTTP MCP access.
@@ -927,6 +927,8 @@ mcp_status=0
 mcp_stop=0
 mcp_json=0
 mcp_port=""
+mcp_local_selected=0
+mcp_tunnel_id=""
 android_mode=0
 emulator_mode=0
 android_gpu=0
@@ -1111,6 +1113,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --local)
       [[ "$cmd" == "mcp" ]] || { echo "--local is only valid with mcp" >&2; exit 1; }
+      mcp_local_selected=1
+      shift
+      ;;
+    --tunnel)
+      [[ "$cmd" == "mcp" ]] || { echo "--tunnel is only valid with mcp" >&2; exit 1; }
+      shift
+      [[ $# -gt 0 ]] || { echo "--tunnel requires a TUNNEL_ID" >&2; exit 1; }
+      mcp_tunnel_id="$1"
       shift
       ;;
     --read-only|--ship)
@@ -1236,14 +1246,30 @@ if [[ -n "$mcp_port" ]] && { ! [[ "$mcp_port" =~ ^[0-9]+$ ]] || [[ "$mcp_port" -
   exit 1
 fi
 
+if [[ "$mcp_local_selected" -eq 1 && -n "$mcp_tunnel_id" ]]; then
+  echo "mcp --local and --tunnel are mutually exclusive." >&2
+  exit 1
+fi
+
+if [[ -n "$mcp_tunnel_id" && ! "$mcp_tunnel_id" =~ ^tunnel_[a-z0-9]{32}$ ]]; then
+  echo "Invalid --tunnel value: expected tunnel_<32 lowercase letters or digits>." >&2
+  exit 1
+fi
+
 if [[ "$mcp_status" -eq 1 && "$mcp_stop" -eq 1 ]]; then
   echo "mcp --status and --stop are mutually exclusive." >&2
   exit 1
 fi
 
+if [[ -n "$mcp_tunnel_id" && -z "${CONTROL_PLANE_API_KEY:-}" ]]; then
+  echo "CONTROL_PLANE_API_KEY is required with --tunnel." >&2
+  exit 1
+fi
+
 if [[ "$cmd" == "mcp" && ( "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 ) ]] &&
-  { [[ "$mcp_mode_selected" -eq 1 ]] || [[ -n "$mcp_port" ]]; }; then
-  echo "MCP mode and port options cannot be combined with --status or --stop." >&2
+  { [[ "$mcp_mode_selected" -eq 1 ]] || [[ -n "$mcp_port" ]] ||
+    [[ "$mcp_local_selected" -eq 1 ]] || [[ -n "$mcp_tunnel_id" ]]; }; then
+  echo "MCP transport, mode, and port options cannot be combined with --status or --stop." >&2
   exit 1
 fi
 
@@ -1648,11 +1674,12 @@ if [[ "$cmd" == "mcp" && "$mcp_status" -eq 1 ]]; then
 fi
 
 if [[ "$cmd" == "mcp" && "$mcp_stop" -eq 1 ]]; then
-  mcp_stop_process "$container_name" "$workspace_hash" "$mcp_json"
+  mcp_stop_rc=0
+  mcp_stop_process "$container_name" "$workspace_hash" "$mcp_json" || mcp_stop_rc=$?
   if [[ "$mcp_json" -eq 1 ]]; then
     mcp_emit_status "$workspace" "$container_name" "$workspace_hash" 1
   fi
-  exit 0
+  exit "$mcp_stop_rc"
 fi
 
 code_server_port=""
@@ -1890,7 +1917,7 @@ run_exec() {
 }
 
 run_mcp() {
-  local existing_state actual_network runtime_dir lock_file
+  local existing_state actual_network runtime_dir lock_file active_port tunnel_json
   runtime_dir="$(mcp_runtime_host_dir "$workspace_hash")"
   lock_file="$runtime_dir/runtime/lock"
   mkdir -p "$(dirname "$lock_file")"
@@ -1916,7 +1943,22 @@ run_mcp() {
     echo "MCP requires a host-networked workspace container; found $actual_network." >&2
     return 1
   fi
+  if [[ "$mcp_local_selected" -eq 1 ]]; then
+    tunnel_json="$(mcp_tunnel_status_json \
+      "$container_name" "$runtime_dir" \
+      "$(mcp_runtime_container_dir "$workspace_hash")")"
+    if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" == true ]]; then
+      echo "Secure MCP Tunnel is already running for this workspace." >&2
+      echo "Stop it before switching to local-only transport." >&2
+      return 1
+    fi
+  fi
   mcp_start_process "$workspace" "$container_name" "$workspace_hash" "$mcp_mode" "$mcp_port"
+  if [[ -n "$mcp_tunnel_id" ]]; then
+    active_port="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" port)"
+    mcp_start_tunnel "$container_name" "$workspace_hash" "$mcp_tunnel_id" "$active_port"
+  fi
+  mcp_emit_status "$workspace" "$container_name" "$workspace_hash" "$mcp_json"
 }
 
 run_install() {

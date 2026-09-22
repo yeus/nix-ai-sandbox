@@ -116,6 +116,10 @@ COPY mcp/install.sh /usr/local/bin/ai-sandbox-mcp-install
 COPY mcp/launch.sh /usr/local/bin/ai-sandbox-mcp-launch
 COPY mcp/status.sh /usr/local/bin/ai-sandbox-mcp-status
 COPY mcp/stop.sh /usr/local/bin/ai-sandbox-mcp-stop
+COPY mcp/tunnel-install.sh /usr/local/bin/ai-sandbox-mcp-tunnel-install
+COPY mcp/tunnel-start.sh /usr/local/bin/ai-sandbox-mcp-tunnel-start
+COPY mcp/tunnel-status.sh /usr/local/bin/ai-sandbox-mcp-tunnel-status
+COPY mcp/tunnel-stop.sh /usr/local/bin/ai-sandbox-mcp-tunnel-stop
 COPY AGENTS.md /usr/local/share/ai-sandbox/default-AGENTS.md
 
 RUN chmod +x \
@@ -130,6 +134,10 @@ RUN chmod +x \
     /usr/local/bin/ai-sandbox-mcp-launch \
     /usr/local/bin/ai-sandbox-mcp-status \
     /usr/local/bin/ai-sandbox-mcp-stop \
+    /usr/local/bin/ai-sandbox-mcp-tunnel-install \
+    /usr/local/bin/ai-sandbox-mcp-tunnel-start \
+    /usr/local/bin/ai-sandbox-mcp-tunnel-status \
+    /usr/local/bin/ai-sandbox-mcp-tunnel-stop \
     && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/local/bin/xdg-open \
     && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/bin/xdg-open \
     && ln -sf /usr/local/bin/ai-sandbox-user-code /usr/local/bin/code

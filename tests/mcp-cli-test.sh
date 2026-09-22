@@ -60,7 +60,44 @@ fi
 
 if [[ "${1:-}" == exec ]]; then
   args="$*"
-  if [[ "$args" == *ai-sandbox-mcp-launch* ]]; then
+  if [[ "$args" == *ai-sandbox-mcp-tunnel-start* ]]; then
+    tail="${args#*ai-sandbox-mcp-tunnel-start }"
+    runtime="${tail%% *}"
+    tail="${tail#* }"
+    version="${tail%% *}"
+    tail="${tail#* }"
+    tunnel_id="${tail%% *}"
+    runtime="${runtime#/sandbox-home/.ai-sandbox/mcp/}"
+    tunnel_dir="$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp/$runtime/tunnel"
+    mkdir -p "$tunnel_dir"
+    jq -n \
+      --arg tunnel_id "$tunnel_id" \
+      --arg version "$version" \
+      '{configured: true, tunnel_id: $tunnel_id, version: $version, transport: "OpenAI Secure MCP Tunnel", process_running: true, healthy: true, ready: true, health_url: "http://127.0.0.1:18080", ui_url: "http://127.0.0.1:18080/ui"}' \
+      >"$tunnel_dir/metadata.json"
+    touch "$tunnel_dir/running"
+  elif [[ "$args" == *ai-sandbox-mcp-tunnel-status* ]]; then
+    tail="${args#*ai-sandbox-mcp-tunnel-status }"
+    runtime="${tail%% *}"
+    runtime="${runtime#/sandbox-home/.ai-sandbox/mcp/}"
+    tunnel_dir="$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp/$runtime/tunnel"
+    if [[ ! -f "$tunnel_dir/metadata.json" ]]; then
+      echo '{"configured":false,"process_running":false,"healthy":false,"ready":false}'
+    elif [[ -f "$tunnel_dir/running" ]]; then
+      cat "$tunnel_dir/metadata.json"
+    else
+      jq '. + {process_running: false, healthy: false, ready: false}' \
+        "$tunnel_dir/metadata.json"
+    fi
+  elif [[ "$args" == *ai-sandbox-mcp-tunnel-stop* ]]; then
+    if [[ "${AI_SANDBOX_TEST_TUNNEL_STOP_FAILS:-0}" == 1 ]]; then
+      exit 0
+    fi
+    tail="${args#*ai-sandbox-mcp-tunnel-stop }"
+    runtime="${tail%% *}"
+    runtime="${runtime#/sandbox-home/.ai-sandbox/mcp/}"
+    rm -f "$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp/$runtime/tunnel/running"
+  elif [[ "$args" == *ai-sandbox-mcp-launch* ]]; then
     runtime="${args#* /sandbox-home/.ai-sandbox/mcp/}"
     runtime="${runtime%% *}"
     runtime_dir="$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp/$runtime"
@@ -100,6 +137,7 @@ export PATH="$fake_bin:/usr/bin:/bin"
 grep -F 'ai-sandbox mcp [WORKSPACE]' "$test_root/help.txt"
 grep -F -- '--read-only' "$test_root/help.txt"
 grep -F -- '--ship' "$test_root/help.txt"
+grep -F -- '--tunnel TUNNEL_ID' "$test_root/help.txt"
 grep -F -- '--status' "$test_root/help.txt"
 grep -F -- '--json' "$test_root/help.txt"
 
@@ -109,6 +147,26 @@ if "$ai_sandbox" mcp "$workspace" --read-only --ship \
   exit 1
 fi
 grep -F 'mutually exclusive' "$test_root/conflict.err"
+
+if "$ai_sandbox" mcp "$workspace" --local \
+  --tunnel tunnel_0123456789abcdef0123456789abcdef \
+  >"$test_root/transport-conflict.out" \
+  2>"$test_root/transport-conflict.err"; then
+  echo "mcp unexpectedly accepted conflicting transports" >&2
+  exit 1
+fi
+grep -F 'mutually exclusive' \
+  "$test_root/transport-conflict.err"
+
+if "$ai_sandbox" mcp "$workspace" \
+  --tunnel not-a-tunnel \
+  >"$test_root/tunnel-id.out" \
+  2>"$test_root/tunnel-id.err"; then
+  echo "mcp unexpectedly accepted an invalid tunnel ID" >&2
+  exit 1
+fi
+grep -F 'Invalid --tunnel value' \
+  "$test_root/tunnel-id.err"
 
 if AI_SANDBOX_NETWORK_MODE=bridge \
   "$ai_sandbox" mcp "$workspace" \
@@ -211,12 +269,120 @@ jq -e '.workspace == $workspace' \
 jq -e '.mode == "write" and .health == "ok"' \
   "$test_root/status.json" >/dev/null
 
+if env -u CONTROL_PLANE_API_KEY \
+  "$ai_sandbox" mcp "$workspace" \
+  --tunnel tunnel_0123456789abcdef0123456789abcdef \
+  >"$test_root/tunnel-key.out" \
+  2>"$test_root/tunnel-key.err"; then
+  echo "mcp tunnel unexpectedly started without a runtime key" >&2
+  exit 1
+fi
+grep -F 'CONTROL_PLANE_API_KEY is required' \
+  "$test_root/tunnel-key.err"
+
+: >"$AI_SANDBOX_TEST_COMMAND_LOG"
+CONTROL_PLANE_API_KEY=sk-synthetic-test-value \
+  "$ai_sandbox" mcp "$workspace" \
+  --tunnel tunnel_0123456789abcdef0123456789abcdef \
+  --json >"$test_root/tunnel.json"
+jq -e '.tunnel.tunnel_id == "tunnel_0123456789abcdef0123456789abcdef"' \
+  "$test_root/tunnel.json" >/dev/null
+jq -e '.tunnel.process_running and .tunnel.healthy and .tunnel.ready' \
+  "$test_root/tunnel.json" >/dev/null
+grep -F '<-e> <CONTROL_PLANE_API_KEY>' \
+  "$AI_SANDBOX_TEST_COMMAND_LOG"
+grep -F 'ai-sandbox-mcp-tunnel-install' \
+  "$AI_SANDBOX_TEST_COMMAND_LOG"
+grep -F 'ai-sandbox-mcp-tunnel-start' \
+  "$AI_SANDBOX_TEST_COMMAND_LOG"
+if grep -R -F 'sk-synthetic-test-value' "$runtime_dir"; then
+  echo "MCP tunnel persisted the runtime key" >&2
+  exit 1
+fi
+if grep -F 'sk-synthetic-test-value' \
+  "$AI_SANDBOX_TEST_COMMAND_LOG"; then
+  echo "MCP tunnel exposed the runtime key in argv" >&2
+  exit 1
+fi
+
+: >"$AI_SANDBOX_TEST_COMMAND_LOG"
+CONTROL_PLANE_API_KEY=sk-synthetic-test-value \
+  "$ai_sandbox" mcp "$workspace" \
+  --tunnel tunnel_0123456789abcdef0123456789abcdef \
+  --json >"$test_root/tunnel-repeat.json" \
+  2>"$test_root/tunnel-repeat.err"
+grep -F 'Secure MCP Tunnel is already running' \
+  "$test_root/tunnel-repeat.err"
+jq -e '.tunnel.process_running' \
+  "$test_root/tunnel-repeat.json" >/dev/null
+if grep -E 'ai-sandbox-mcp-tunnel-(install|start)' \
+  "$AI_SANDBOX_TEST_COMMAND_LOG"; then
+  echo "repeated tunnel start relaunched the tunnel client" >&2
+  exit 1
+fi
+
+: >"$AI_SANDBOX_TEST_COMMAND_LOG"
+if CONTROL_PLANE_API_KEY=sk-synthetic-test-value \
+  "$ai_sandbox" mcp "$workspace" \
+  --tunnel tunnel_ffffffffffffffffffffffffffffffff \
+  >"$test_root/tunnel-change.out" \
+  2>"$test_root/tunnel-change.err"; then
+  echo "mcp unexpectedly switched an active tunnel" >&2
+  exit 1
+fi
+grep -F 'Stop it before changing tunnels' \
+  "$test_root/tunnel-change.err"
+if grep -E 'ai-sandbox-mcp-tunnel-(install|start)' \
+  "$AI_SANDBOX_TEST_COMMAND_LOG"; then
+  echo "conflicting tunnel request relaunched the tunnel client" >&2
+  exit 1
+fi
+
+"$ai_sandbox" mcp "$workspace" \
+  --status --json >"$test_root/tunnel-status.json"
+jq -e '.tunnel.transport == "OpenAI Secure MCP Tunnel"' \
+  "$test_root/tunnel-status.json" >/dev/null
+jq -e '.tunnel.version == "v0.0.14"' \
+  "$test_root/tunnel-status.json" >/dev/null
+
+if "$ai_sandbox" mcp "$workspace" --local \
+  >"$test_root/local-change.out" \
+  2>"$test_root/local-change.err"; then
+  echo "mcp unexpectedly disabled an active tunnel implicitly" >&2
+  exit 1
+fi
+grep -F 'Stop it before switching to local-only transport' \
+  "$test_root/local-change.err"
+
+jq '.version = "v9.9.9"' \
+  "$runtime_dir/tunnel/metadata.json" >"$test_root/tunnel-metadata.json"
+mv "$test_root/tunnel-metadata.json" "$runtime_dir/tunnel/metadata.json"
+
+: >"$AI_SANDBOX_TEST_COMMAND_LOG"
+if AI_SANDBOX_TEST_TUNNEL_STOP_FAILS=1 \
+  "$ai_sandbox" mcp "$workspace" --stop --json \
+  >"$test_root/stop-fail.json" 2>"$test_root/stop-fail.err"; then
+  echo "mcp --stop reported success while the tunnel kept running" >&2
+  exit 1
+fi
+jq -e '.tunnel.process_running == true' \
+  "$test_root/stop-fail.json" >/dev/null
+grep -F 'Secure MCP Tunnel is still running' \
+  "$test_root/stop-fail.err"
+grep -F '<v9.9.9>' "$AI_SANDBOX_TEST_COMMAND_LOG"
+[[ -f "$runtime_dir/tunnel/running" ]]
+
+: >"$AI_SANDBOX_TEST_COMMAND_LOG"
 "$ai_sandbox" mcp "$workspace" --stop >"$test_root/stop.out"
-grep -F 'Stopped MCP process' "$test_root/stop.out"
+grep -F 'Stopped Secure MCP Tunnel' "$test_root/stop.out"
+grep -F '<v9.9.9>' "$AI_SANDBOX_TEST_COMMAND_LOG"
 [[ -f "$AI_SANDBOX_TEST_PODMAN_STATE" ]]
+[[ ! -f "$runtime_dir/tunnel/running" ]]
 
 "$ai_sandbox" mcp "$workspace" --status --json >"$test_root/stopped.json"
 jq -e '.health == "stopped"' "$test_root/stopped.json" >/dev/null
+jq -e '.tunnel.process_running == false' \
+  "$test_root/stopped.json" >/dev/null
 
 "$ai_sandbox" mcp "$workspace" --read-only --json \
   >"$test_root/read.json" 2>"$test_root/read.err"

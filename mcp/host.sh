@@ -2,6 +2,7 @@
 
 AI_SANDBOX_MCP_IMPLEMENTATION="gpt-repo-mcp"
 AI_SANDBOX_MCP_COMMIT="986f2135f00959f8e0d214ed8d173a7054f4cea1"
+AI_SANDBOX_MCP_TUNNEL_VERSION="v0.0.14"
 AI_SANDBOX_MCP_PORT_MIN=19080
 AI_SANDBOX_MCP_PORT_COUNT=920
 
@@ -154,12 +155,103 @@ mcp_read_metadata_field() {
   jq -r --arg field "$field" '.[$field] // empty' "$metadata" 2>/dev/null || true
 }
 
+mcp_tunnel_status_json() {
+  local container="$1"
+  local runtime_host_dir="$2"
+  local runtime_container_dir="$3"
+  local metadata="$runtime_host_dir/tunnel/metadata.json"
+  local version
+
+  if [[ ! -f "$metadata" ]]; then
+    jq -n '{configured: false, process_running: false, healthy: false, ready: false}'
+    return
+  fi
+  version="$(mcp_read_metadata_field "$metadata" version)"
+  [[ -n "$version" ]] || version="$AI_SANDBOX_MCP_TUNNEL_VERSION"
+  if container_is_running "$container"; then
+    podman exec "$container" \
+      /usr/local/bin/ai-sandbox-mcp-tunnel-status \
+      "$runtime_container_dir" \
+      "$version" 2>/dev/null && return
+  fi
+  jq '. + {configured: true, process_running: false, healthy: false, ready: false}' \
+    "$metadata"
+}
+
+mcp_start_tunnel() {
+  local container="$1"
+  local hash="$2"
+  local tunnel_id="$3"
+  local port="$4"
+  local runtime_dir runtime_container_dir tunnel_json existing_tunnel_id
+  runtime_dir="$(mcp_runtime_host_dir "$hash")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash")"
+  tunnel_json="$(mcp_tunnel_status_json \
+    "$container" "$runtime_dir" "$runtime_container_dir")"
+
+  if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" == true ]]; then
+    existing_tunnel_id="$(jq -r '.tunnel_id // empty' <<<"$tunnel_json")"
+    if [[ "$existing_tunnel_id" == "$tunnel_id" ]]; then
+      echo "Secure MCP Tunnel is already running for this workspace." >&2
+      return 0
+    fi
+    echo "Secure MCP Tunnel is already running with $existing_tunnel_id." >&2
+    echo "Stop it before changing tunnels." >&2
+    return 1
+  fi
+
+  podman exec "$container" \
+    /usr/local/bin/ai-sandbox-mcp-tunnel-install \
+    "$AI_SANDBOX_MCP_TUNNEL_VERSION" >&2
+  podman exec -e CONTROL_PLANE_API_KEY "$container" \
+    /usr/local/bin/ai-sandbox-mcp-tunnel-start \
+    "$runtime_container_dir" \
+    "$AI_SANDBOX_MCP_TUNNEL_VERSION" \
+    "$tunnel_id" \
+    "$port" >&2
+}
+
+mcp_stop_tunnel() {
+  local container="$1"
+  local hash="$2"
+  local quiet="${3:-0}"
+  local runtime_dir runtime_container_dir tunnel_json tunnel_version attempt
+  runtime_dir="$(mcp_runtime_host_dir "$hash")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash")"
+  tunnel_json="$(mcp_tunnel_status_json \
+    "$container" "$runtime_dir" "$runtime_container_dir")"
+
+  if [[ "$(jq -r '.configured' <<<"$tunnel_json")" != true ]] ||
+    [[ "$(jq -r '.process_running' <<<"$tunnel_json")" != true ]] ||
+    ! container_is_running "$container"; then
+    return 0
+  fi
+  tunnel_version="$(jq -r '.version // empty' <<<"$tunnel_json")"
+  [[ -n "$tunnel_version" ]] || tunnel_version="$AI_SANDBOX_MCP_TUNNEL_VERSION"
+  podman exec "$container" \
+    /usr/local/bin/ai-sandbox-mcp-tunnel-stop \
+    "$runtime_container_dir" \
+    "$tunnel_version"
+
+  for ((attempt = 1; attempt <= 10; attempt++)); do
+    tunnel_json="$(mcp_tunnel_status_json \
+      "$container" "$runtime_dir" "$runtime_container_dir")"
+    if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" != true ]]; then
+      [[ "$quiet" -eq 1 ]] || echo "Stopped Secure MCP Tunnel for $container."
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "Secure MCP Tunnel is still running for $container." >&2
+  return 1
+}
+
 mcp_emit_status() {
   local workspace_path="$1"
   local container="$2"
   local hash="$3"
   local json_output="$4"
-  local runtime_dir runtime_container_dir metadata port mode pid expected_container_id process_state health endpoint
+  local runtime_dir runtime_container_dir metadata port mode pid expected_container_id process_state health endpoint tunnel_json tunnel_ui
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
   runtime_container_dir="$(mcp_runtime_container_dir "$hash")"
   metadata="$runtime_dir/runtime/metadata.json"
@@ -173,6 +265,8 @@ mcp_emit_status() {
   health="$(mcp_health_state "$process_state" "${port:-0}")"
   endpoint=""
   [[ -n "$port" ]] && endpoint="http://127.0.0.1:$port/mcp"
+  tunnel_json="$(mcp_tunnel_status_json \
+    "$container" "$runtime_dir" "$runtime_container_dir")"
 
   if [[ "$json_output" -eq 1 ]]; then
     jq -n \
@@ -186,7 +280,8 @@ mcp_emit_status() {
       --arg endpoint "$endpoint" \
       --arg pid "$pid" \
       --arg health "$health" \
-      '{workspace: $workspace, repository_id: $repository_id, container: $container, mode: ($mode | if length > 0 then . else null end), implementation: $implementation, version: $version, transport: $transport, endpoint: ($endpoint | if length > 0 then . else null end), pid: ($pid | if length > 0 then . else null end), health: $health}'
+      --argjson tunnel "$tunnel_json" \
+      '{workspace: $workspace, repository_id: $repository_id, container: $container, mode: ($mode | if length > 0 then . else null end), implementation: $implementation, version: $version, transport: $transport, endpoint: ($endpoint | if length > 0 then . else null end), pid: ($pid | if length > 0 then . else null end), health: $health, tunnel: $tunnel}'
     return
   fi
 
@@ -204,18 +299,35 @@ mcp_emit_status() {
     ok) echo "Health: OK" ;;
     *) echo "Health: ${health^^}" ;;
   esac
+  if [[ "$(jq -r '.configured' <<<"$tunnel_json")" == true ]]; then
+    echo "Secure Tunnel: $(jq -r '.tunnel_id' <<<"$tunnel_json")"
+    echo "Tunnel Client: $(jq -r '.version' <<<"$tunnel_json")"
+    if [[ "$(jq -r '.ready' <<<"$tunnel_json")" == true ]]; then
+      echo "Tunnel Health: READY"
+    elif [[ "$(jq -r '.process_running' <<<"$tunnel_json")" == true ]]; then
+      echo "Tunnel Health: UNHEALTHY"
+    else
+      echo "Tunnel Health: STOPPED"
+    fi
+    tunnel_ui="$(jq -r '.ui_url // empty' <<<"$tunnel_json")"
+    [[ -z "$tunnel_ui" ]] || echo "Tunnel UI: $tunnel_ui"
+  else
+    echo "Secure Tunnel: disabled"
+  fi
 }
 
 mcp_stop_process() {
   local container="$1"
   local hash="$2"
   local quiet="${3:-0}"
-  local runtime_dir runtime_container_dir metadata expected_container_id process_state
+  local runtime_dir runtime_container_dir metadata expected_container_id process_state tunnel_stop_failed=0
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
   runtime_container_dir="$(mcp_runtime_container_dir "$hash")"
   metadata="$runtime_dir/runtime/metadata.json"
   expected_container_id="$(mcp_read_metadata_field "$metadata" container_id)"
   process_state="$(mcp_process_state "$container" "$runtime_container_dir" "$expected_container_id")"
+
+  mcp_stop_tunnel "$container" "$hash" "$quiet" || tunnel_stop_failed=1
 
   if [[ "$process_state" == running ]]; then
     podman exec "$container" /usr/local/bin/ai-sandbox-mcp-stop "$runtime_container_dir"
@@ -224,6 +336,7 @@ mcp_stop_process() {
     [[ "$quiet" -eq 1 ]] || echo "No running MCP process found for $container."
   fi
   rm -f "$runtime_dir/runtime/pid" "$metadata"
+  return "$tunnel_stop_failed"
 }
 
 mcp_wait_for_pid() {
@@ -301,7 +414,6 @@ mcp_start_process() {
       return 1
     fi
     echo "MCP is already running for this workspace." >&2
-    mcp_emit_status "$workspace_path" "$container" "$hash" "$mcp_json"
     return
   fi
   if [[ "$process_state" == stale ]]; then
@@ -318,5 +430,4 @@ mcp_start_process() {
   container_id="$(mcp_container_id "$container")"
   mcp_write_metadata "$metadata" "$workspace_path" "$container" "$container_id" "$mode" "$port" "$pid"
   mcp_wait_for_health "$port" "$container"
-  mcp_emit_status "$workspace_path" "$container" "$hash" "$mcp_json"
 }
