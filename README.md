@@ -272,20 +272,24 @@ ais mcp --local
 ```
 
 To connect the loopback-only server to ChatGPT through OpenAI Secure MCP
-Tunnel, first create a tunnel and runtime API key in OpenAI Platform. Then run:
+Tunnel, run:
 
 ```bash
-export CONTROL_PLANE_API_KEY='sk-...'
-
-ais mcp --tunnel \
-  tunnel_0123456789abcdef0123456789abcdef
+ais mcp --tunnel
 ```
 
-The runtime key is passed to `tunnel-client` through its environment and is not
-written to MCP configuration or metadata. The pinned, checksum-verified tunnel
-client runs inside the workspace container and keeps its profile, logs, and
-runtime state in the workspace's sandbox-owned MCP storage. Startup reports
-success only after the tunnel is connected and ready.
+On first use, `ais` links directly to the OpenAI pages where you create a Secure
+MCP Tunnel and a runtime API key with Tunnels Read + Use permission, then asks
+for both values. The prompts store them in the desktop Secret Service through
+`secret-tool`; they are not written to shell configuration, MCP configuration,
+or metadata. Later `ais mcp --tunnel` invocations reuse the saved values. You
+can also provide a tunnel ID explicitly with `--tunnel TUNNEL_ID`; it is saved
+after the runtime key is available.
+
+The runtime key is exposed only to the tunnel-client launch process. The
+pinned, checksum-verified tunnel client runs inside the workspace container and
+keeps its profile, logs, and runtime state in the workspace's sandbox-owned MCP
+storage. Startup reports success only after the tunnel is connected and ready.
 
 An active tunnel is never switched or disabled implicitly: stop it first before
 using `--local` or a different tunnel ID. `--status` reports both local MCP and

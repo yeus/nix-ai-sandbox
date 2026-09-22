@@ -5,6 +5,101 @@ AI_SANDBOX_MCP_COMMIT="986f2135f00959f8e0d214ed8d173a7054f4cea1"
 AI_SANDBOX_MCP_TUNNEL_VERSION="v0.0.14"
 AI_SANDBOX_MCP_PORT_MIN=19080
 AI_SANDBOX_MCP_PORT_COUNT=920
+AI_SANDBOX_MCP_TUNNELS_URL="https://platform.openai.com/settings/organization/tunnels"
+AI_SANDBOX_MCP_RUNTIME_KEYS_URL="https://platform.openai.com/settings/organization/api-keys"
+
+mcp_secret_lookup() {
+  local field="$1"
+  secret-tool lookup \
+    service ai-sandbox \
+    credential "$field" 2>/dev/null || true
+}
+
+mcp_secret_store() {
+  local field="$1"
+  local label="$2"
+  local value="$3"
+  if ! printf '%s' "$value" | secret-tool store \
+    --label="$label" \
+    service ai-sandbox \
+    credential "$field" >/dev/null; then
+    echo "Could not store $label in Secret Service." >&2
+    return 1
+  fi
+}
+
+mcp_explain_missing_tunnel_credentials() {
+  local tunnel_id="$1"
+  local runtime_key="$2"
+  if [[ -z "$tunnel_id" ]]; then
+    echo "Create an OpenAI Secure MCP Tunnel, then copy its tunnel ID:" >&2
+    echo "  $AI_SANDBOX_MCP_TUNNELS_URL" >&2
+  fi
+  if [[ -z "$runtime_key" ]]; then
+    echo "Create a runtime API key with Tunnels Read + Use, then copy it:" >&2
+    echo "  $AI_SANDBOX_MCP_RUNTIME_KEYS_URL" >&2
+  fi
+}
+
+mcp_resolve_tunnel_credentials() {
+  local requested_tunnel_id="$1"
+  local -n resolved_tunnel_id="$2"
+  local -n resolved_runtime_key="$3"
+  local saved_tunnel_id saved_runtime_key
+
+  if ! command -v secret-tool >/dev/null 2>&1; then
+    echo "Secure MCP Tunnel setup requires Secret Service (secret-tool)." >&2
+    echo "Install libsecret, then retry." >&2
+    return 1
+  fi
+
+  saved_tunnel_id="$(mcp_secret_lookup tunnel-id)"
+  saved_runtime_key="$(mcp_secret_lookup runtime-api-key)"
+  resolved_tunnel_id="${requested_tunnel_id:-$saved_tunnel_id}"
+  resolved_runtime_key="$saved_runtime_key"
+
+  mcp_explain_missing_tunnel_credentials \
+    "$resolved_tunnel_id" "$resolved_runtime_key"
+  if { [[ -z "$resolved_tunnel_id" ]] || [[ -z "$resolved_runtime_key" ]]; } &&
+    { [[ ! -t 0 ]] || [[ ! -t 2 ]]; }; then
+    echo "Tunnel setup needs an interactive terminal to securely collect missing values." >&2
+    return 1
+  fi
+
+  if [[ -z "$resolved_tunnel_id" ]]; then
+    read -r -p "Tunnel ID: " resolved_tunnel_id
+  fi
+  if [[ ! "$resolved_tunnel_id" =~ ^tunnel_[a-z0-9]{32}$ ]]; then
+    echo "Invalid tunnel ID: expected tunnel_<32 lowercase letters or digits>." >&2
+    return 1
+  fi
+  if [[ -z "$resolved_runtime_key" ]]; then
+    read -r -s -p "Runtime API key: " resolved_runtime_key
+    echo >&2
+    if [[ -z "$resolved_runtime_key" ]]; then
+      echo "Runtime API key cannot be empty." >&2
+      return 1
+    fi
+  fi
+}
+
+mcp_store_tunnel_credentials() {
+  local tunnel_id="$1"
+  local runtime_key="$2"
+  local saved_tunnel_id saved_runtime_key
+  saved_tunnel_id="$(mcp_secret_lookup tunnel-id)"
+  saved_runtime_key="$(mcp_secret_lookup runtime-api-key)"
+
+  if [[ "$tunnel_id" != "$saved_tunnel_id" ]]; then
+    mcp_secret_store tunnel-id "AI Sandbox MCP tunnel ID" "$tunnel_id"
+  fi
+  if [[ "$runtime_key" != "$saved_runtime_key" ]]; then
+    mcp_secret_store \
+      runtime-api-key \
+      "AI Sandbox MCP runtime API key" \
+      "$runtime_key"
+  fi
+}
 
 mcp_require_home_path() {
   if [[ "$HOME_STORAGE" != /* ]]; then
@@ -183,6 +278,7 @@ mcp_start_tunnel() {
   local hash="$2"
   local tunnel_id="$3"
   local port="$4"
+  local runtime_api_key="$5"
   local runtime_dir runtime_container_dir tunnel_json existing_tunnel_id
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
   runtime_container_dir="$(mcp_runtime_container_dir "$hash")"
@@ -200,10 +296,13 @@ mcp_start_tunnel() {
     return 1
   fi
 
+  echo "Preparing Secure MCP Tunnel client..." >&2
   podman exec "$container" \
     /usr/local/bin/ai-sandbox-mcp-tunnel-install \
     "$AI_SANDBOX_MCP_TUNNEL_VERSION" >&2
-  podman exec -e CONTROL_PLANE_API_KEY "$container" \
+  echo "Connecting Secure MCP Tunnel..." >&2
+  CONTROL_PLANE_API_KEY="$runtime_api_key" \
+    podman exec -e CONTROL_PLANE_API_KEY "$container" \
     /usr/local/bin/ai-sandbox-mcp-tunnel-start \
     "$runtime_container_dir" \
     "$AI_SANDBOX_MCP_TUNNEL_VERSION" \

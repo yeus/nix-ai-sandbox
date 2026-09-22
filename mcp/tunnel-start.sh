@@ -44,10 +44,16 @@ fi
 
 ready=0
 for ((attempt = 1; attempt <= 120; attempt++)); do
-  if "$client" runtimes status workspace --json >"$status_file" 2>/dev/null &&
+  # Readiness only needs local runtime health. Hiding the key prevents status
+  # from repeating the remote tunnel lookup performed by connect.
+  if env -u CONTROL_PLANE_API_KEY \
+    "$client" runtimes status workspace --json >"$status_file" 2>/dev/null &&
     jq -e '.process_running and .healthy and .ready' "$status_file" >/dev/null; then
     ready=1
     break
+  fi
+  if ((attempt % 20 == 0)); then
+    echo "Still waiting for Secure MCP Tunnel readiness..." >&2
   fi
   sleep 0.5
 done

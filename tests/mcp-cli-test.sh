@@ -5,8 +5,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ai_sandbox="$repo_root/ai-sandbox/ai-sandbox"
 test_root="$(mktemp -d)"
 listener_pid=""
+lock_holder_pid=""
 cleanup() {
   [[ -z "$listener_pid" ]] || kill "$listener_pid" 2>/dev/null || true
+  [[ -z "$lock_holder_pid" ]] || kill "$lock_holder_pid" 2>/dev/null || true
   rm -rf "$test_root"
 }
 trap cleanup EXIT
@@ -21,6 +23,7 @@ export AI_SANDBOX_NIX_STORAGE="$test_root/nix"
 export AI_SANDBOX_AUTO_RECONNECT=0
 export AI_SANDBOX_TEST_PODMAN_STATE="$test_root/container-running"
 export AI_SANDBOX_TEST_COMMAND_LOG="$test_root/commands.log"
+export AI_SANDBOX_TEST_SECRET_DIR="$test_root/secrets"
 
 fake_bin="$test_root/bin"
 mkdir -p "$fake_bin"
@@ -61,6 +64,9 @@ fi
 if [[ "${1:-}" == exec ]]; then
   args="$*"
   if [[ "$args" == *ai-sandbox-mcp-tunnel-start* ]]; then
+    if [[ "${AI_SANDBOX_TEST_TUNNEL_START_FAILS:-0}" == 1 ]]; then
+      exit 1
+    fi
     tail="${args#*ai-sandbox-mcp-tunnel-start }"
     runtime="${tail%% *}"
     tail="${tail#* }"
@@ -130,14 +136,34 @@ cat >"$fake_bin/curl" <<'EOF'
 exit 0
 EOF
 
-chmod +x "$fake_bin/podman" "$fake_bin/curl"
+cat >"$fake_bin/secret-tool" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p "$AI_SANDBOX_TEST_SECRET_DIR"
+case "${1:-}" in
+  lookup)
+    field="${5:-}"
+    [[ -f "$AI_SANDBOX_TEST_SECRET_DIR/$field" ]] || exit 1
+    cat "$AI_SANDBOX_TEST_SECRET_DIR/$field"
+    ;;
+  store)
+    field="${6:-}"
+    value="$(cat)"
+    printf '%s' "$value" >"$AI_SANDBOX_TEST_SECRET_DIR/$field"
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+
+chmod +x "$fake_bin/podman" "$fake_bin/curl" "$fake_bin/secret-tool"
 export PATH="$fake_bin:/usr/bin:/bin"
 
 "$ai_sandbox" help >"$test_root/help.txt"
 grep -F 'ai-sandbox mcp [WORKSPACE]' "$test_root/help.txt"
 grep -F -- '--read-only' "$test_root/help.txt"
 grep -F -- '--ship' "$test_root/help.txt"
-grep -F -- '--tunnel TUNNEL_ID' "$test_root/help.txt"
+grep -F -- '--tunnel [TUNNEL_ID]' "$test_root/help.txt"
 grep -F -- '--status' "$test_root/help.txt"
 grep -F -- '--json' "$test_root/help.txt"
 
@@ -215,6 +241,23 @@ grep -F 'cannot expose a submodule' "$test_root/submodule.err"
 : >"$AI_SANDBOX_TEST_COMMAND_LOG"
 mkdir -p "$AI_SANDBOX_STATE_DIR"
 printf 'interactive-container\n' >"$AI_SANDBOX_STATE_DIR/last-container"
+workspace_hash="$(printf '%s' "$workspace" | sha256sum | cut -c1-12)"
+runtime_dir="$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp/$workspace_hash"
+mkdir -p "$runtime_dir/runtime"
+flock "$runtime_dir/runtime/lock" sleep 4 &
+lock_holder_pid=$!
+sleep 0.1
+if "$ai_sandbox" mcp "$workspace" \
+  >"$test_root/lock.out" 2>"$test_root/lock.err"; then
+  echo "mcp unexpectedly waited for and acquired a busy lock" >&2
+  exit 1
+fi
+grep -F 'Another MCP operation is already in progress' \
+  "$test_root/lock.err"
+kill "$lock_holder_pid" 2>/dev/null || true
+wait "$lock_holder_pid" 2>/dev/null || true
+lock_holder_pid=""
+
 "$ai_sandbox" mcp "$workspace" --port 18787 \
   >"$test_root/start.out" 2>"$test_root/start.err"
 grep -F 'Mode: write' "$test_root/start.out"
@@ -224,8 +267,6 @@ grep -F '986f2135f00959f8e0d214ed8d173a7054f4cea1' \
   "$test_root/start.out"
 [[ "$(<"$AI_SANDBOX_STATE_DIR/last-container")" == interactive-container ]]
 
-workspace_hash="$(printf '%s' "$workspace" | sha256sum | cut -c1-12)"
-runtime_dir="$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp/$workspace_hash"
 jq -e '.repos | length == 1' "$runtime_dir/config.json" >/dev/null
 jq -e '.repos[0].repo_id == "workspace"' "$runtime_dir/config.json" >/dev/null
 jq -e '.repos[0].root == "/workspace"' "$runtime_dir/config.json" >/dev/null
@@ -269,22 +310,64 @@ jq -e '.workspace == $workspace' \
 jq -e '.mode == "write" and .health == "ok"' \
   "$test_root/status.json" >/dev/null
 
-if env -u CONTROL_PLANE_API_KEY \
-  "$ai_sandbox" mcp "$workspace" \
-  --tunnel tunnel_0123456789abcdef0123456789abcdef \
-  >"$test_root/tunnel-key.out" \
-  2>"$test_root/tunnel-key.err"; then
-  echo "mcp tunnel unexpectedly started without a runtime key" >&2
+if "$ai_sandbox" mcp "$workspace" --tunnel \
+  >"$test_root/tunnel-setup.out" \
+  2>"$test_root/tunnel-setup.err"; then
+  echo "mcp tunnel unexpectedly started without saved credentials" >&2
   exit 1
 fi
-grep -F 'CONTROL_PLANE_API_KEY is required' \
-  "$test_root/tunnel-key.err"
+grep -F 'https://platform.openai.com/settings/organization/tunnels' \
+  "$test_root/tunnel-setup.err"
+grep -F 'https://platform.openai.com/settings/organization/api-keys' \
+  "$test_root/tunnel-setup.err"
+grep -F 'interactive terminal' "$test_root/tunnel-setup.err"
+
+failed_prompt_workspace="$test_root/failed-prompt-workspace"
+mkdir -p "$failed_prompt_workspace"
+git -C "$failed_prompt_workspace" init -q
+export AI_SANDBOX_TEST_TUNNEL_START_FAILS=1
+if printf '%s\n%s\n' \
+  'tunnel_0123456789abcdef0123456789abcdef' \
+  'sk-synthetic-invalid-value' | \
+  script -q -E never -e \
+    -c "$ai_sandbox mcp $failed_prompt_workspace --tunnel --json" \
+    /dev/null >"$test_root/tunnel-prompt-failure.out"; then
+  echo "mcp tunnel unexpectedly accepted a failed connection" >&2
+  exit 1
+fi
+unset AI_SANDBOX_TEST_TUNNEL_START_FAILS
+[[ ! -e "$AI_SANDBOX_TEST_SECRET_DIR/tunnel-id" ]]
+[[ ! -e "$AI_SANDBOX_TEST_SECRET_DIR/runtime-api-key" ]]
+
+prompt_workspace="$test_root/prompt-workspace"
+mkdir -p "$prompt_workspace"
+git -C "$prompt_workspace" init -q
+printf '%s\n%s\n' \
+  'tunnel_0123456789abcdef0123456789abcdef' \
+  'sk-synthetic-test-value' | \
+  script -q -E never -e \
+    -c "$ai_sandbox mcp $prompt_workspace --tunnel --json" \
+    /dev/null >"$test_root/tunnel-prompt.out"
+grep -F 'Create an OpenAI Secure MCP Tunnel' \
+  "$test_root/tunnel-prompt.out"
+grep -F 'Create a runtime API key' \
+  "$test_root/tunnel-prompt.out"
+[[ "$(<"$AI_SANDBOX_TEST_SECRET_DIR/tunnel-id")" == \
+  tunnel_0123456789abcdef0123456789abcdef ]]
+[[ "$(<"$AI_SANDBOX_TEST_SECRET_DIR/runtime-api-key")" == \
+  sk-synthetic-test-value ]]
+if grep -F 'sk-synthetic-test-value' "$test_root/tunnel-prompt.out"; then
+  echo "MCP tunnel prompt echoed the runtime key" >&2
+  exit 1
+fi
 
 : >"$AI_SANDBOX_TEST_COMMAND_LOG"
-CONTROL_PLANE_API_KEY=sk-synthetic-test-value \
-  "$ai_sandbox" mcp "$workspace" \
-  --tunnel tunnel_0123456789abcdef0123456789abcdef \
-  --json >"$test_root/tunnel.json"
+CONTROL_PLANE_API_KEY=sk-ignored-environment-value \
+  "$ai_sandbox" mcp "$workspace" --tunnel \
+  --json >"$test_root/tunnel.json" \
+  2>"$test_root/tunnel.err"
+grep -F 'Connecting Secure MCP Tunnel' \
+  "$test_root/tunnel.err"
 jq -e '.tunnel.tunnel_id == "tunnel_0123456789abcdef0123456789abcdef"' \
   "$test_root/tunnel.json" >/dev/null
 jq -e '.tunnel.process_running and .tunnel.healthy and .tunnel.ready' \
@@ -299,15 +382,23 @@ if grep -R -F 'sk-synthetic-test-value' "$runtime_dir"; then
   echo "MCP tunnel persisted the runtime key" >&2
   exit 1
 fi
+if grep -R -F 'sk-ignored-environment-value' "$runtime_dir"; then
+  echo "MCP tunnel persisted the ignored environment key" >&2
+  exit 1
+fi
 if grep -F 'sk-synthetic-test-value' \
   "$AI_SANDBOX_TEST_COMMAND_LOG"; then
   echo "MCP tunnel exposed the runtime key in argv" >&2
   exit 1
 fi
+if grep -F 'sk-ignored-environment-value' \
+  "$AI_SANDBOX_TEST_COMMAND_LOG"; then
+  echo "MCP tunnel exposed the ignored environment key in argv" >&2
+  exit 1
+fi
 
 : >"$AI_SANDBOX_TEST_COMMAND_LOG"
-CONTROL_PLANE_API_KEY=sk-synthetic-test-value \
-  "$ai_sandbox" mcp "$workspace" \
+"$ai_sandbox" mcp "$workspace" \
   --tunnel tunnel_0123456789abcdef0123456789abcdef \
   --json >"$test_root/tunnel-repeat.json" \
   2>"$test_root/tunnel-repeat.err"
@@ -322,8 +413,7 @@ if grep -E 'ai-sandbox-mcp-tunnel-(install|start)' \
 fi
 
 : >"$AI_SANDBOX_TEST_COMMAND_LOG"
-if CONTROL_PLANE_API_KEY=sk-synthetic-test-value \
-  "$ai_sandbox" mcp "$workspace" \
+if "$ai_sandbox" mcp "$workspace" \
   --tunnel tunnel_ffffffffffffffffffffffffffffffff \
   >"$test_root/tunnel-change.out" \
   2>"$test_root/tunnel-change.err"; then

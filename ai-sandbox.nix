@@ -48,6 +48,7 @@ let
       pkgs.procps
       pkgs.curl
       pkgs.jq
+      pkgs.libsecret
     ]}:$PATH
 
     exec ${./ai-sandbox} "$@"

@@ -30,7 +30,7 @@ Usage:
   ai-sandbox serve [WORKSPACE] [--instance NAME] --stop
     Start or stop browser-based code-server on a stable loopback port.
 
-  ai-sandbox mcp [WORKSPACE] [--read-only|--ship] [--local|--tunnel TUNNEL_ID] [--port PORT]
+  ai-sandbox mcp [WORKSPACE] [--read-only|--ship] [--local|--tunnel [TUNNEL_ID]] [--port PORT]
   ai-sandbox mcp [WORKSPACE] --status [--json]
   ai-sandbox mcp [WORKSPACE] --stop [--json]
     Start, inspect, or stop policy-controlled local HTTP MCP access.
@@ -928,7 +928,9 @@ mcp_stop=0
 mcp_json=0
 mcp_port=""
 mcp_local_selected=0
+mcp_tunnel_selected=0
 mcp_tunnel_id=""
+mcp_runtime_api_key=""
 android_mode=0
 emulator_mode=0
 android_gpu=0
@@ -1118,10 +1120,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tunnel)
       [[ "$cmd" == "mcp" ]] || { echo "--tunnel is only valid with mcp" >&2; exit 1; }
+      mcp_tunnel_selected=1
       shift
-      [[ $# -gt 0 ]] || { echo "--tunnel requires a TUNNEL_ID" >&2; exit 1; }
-      mcp_tunnel_id="$1"
-      shift
+      if [[ $# -gt 0 && "$1" != -* ]]; then
+        mcp_tunnel_id="$1"
+        shift
+      fi
       ;;
     --read-only|--ship)
       [[ "$cmd" == "mcp" ]] || { echo "$1 is only valid with mcp" >&2; exit 1; }
@@ -1246,7 +1250,7 @@ if [[ -n "$mcp_port" ]] && { ! [[ "$mcp_port" =~ ^[0-9]+$ ]] || [[ "$mcp_port" -
   exit 1
 fi
 
-if [[ "$mcp_local_selected" -eq 1 && -n "$mcp_tunnel_id" ]]; then
+if [[ "$mcp_local_selected" -eq 1 && "$mcp_tunnel_selected" -eq 1 ]]; then
   echo "mcp --local and --tunnel are mutually exclusive." >&2
   exit 1
 fi
@@ -1261,14 +1265,9 @@ if [[ "$mcp_status" -eq 1 && "$mcp_stop" -eq 1 ]]; then
   exit 1
 fi
 
-if [[ -n "$mcp_tunnel_id" && -z "${CONTROL_PLANE_API_KEY:-}" ]]; then
-  echo "CONTROL_PLANE_API_KEY is required with --tunnel." >&2
-  exit 1
-fi
-
 if [[ "$cmd" == "mcp" && ( "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 ) ]] &&
   { [[ "$mcp_mode_selected" -eq 1 ]] || [[ -n "$mcp_port" ]] ||
-    [[ "$mcp_local_selected" -eq 1 ]] || [[ -n "$mcp_tunnel_id" ]]; }; then
+    [[ "$mcp_local_selected" -eq 1 ]] || [[ "$mcp_tunnel_selected" -eq 1 ]]; }; then
   echo "MCP transport, mode, and port options cannot be combined with --status or --stop." >&2
   exit 1
 fi
@@ -1609,6 +1608,12 @@ if [[ "$cmd" == "mcp" ]]; then
     echo "Run it from the top-level mounted repository instead: $mount_root" >&2
     exit 1
   fi
+  if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 && "$mcp_tunnel_selected" -eq 1 ]]; then
+    mcp_resolve_tunnel_credentials \
+      "$mcp_tunnel_id" \
+      mcp_tunnel_id \
+      mcp_runtime_api_key
+  fi
 fi
 
 flake_arg_container="${flake_arg:-}"
@@ -1922,7 +1927,11 @@ run_mcp() {
   lock_file="$runtime_dir/runtime/lock"
   mkdir -p "$(dirname "$lock_file")"
   exec 8>"$lock_file"
-  flock 8
+  if ! flock -w 2 8; then
+    echo "Another MCP operation is already in progress for this workspace." >&2
+    echo "Wait for it to finish, or stop the stuck process before retrying." >&2
+    return 1
+  fi
 
   existing_state="$(podman inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
   if [[ "$existing_state" == "running" ]]; then
@@ -1956,7 +1965,16 @@ run_mcp() {
   mcp_start_process "$workspace" "$container_name" "$workspace_hash" "$mcp_mode" "$mcp_port"
   if [[ -n "$mcp_tunnel_id" ]]; then
     active_port="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" port)"
-    mcp_start_tunnel "$container_name" "$workspace_hash" "$mcp_tunnel_id" "$active_port"
+    mcp_start_tunnel \
+      "$container_name" \
+      "$workspace_hash" \
+      "$mcp_tunnel_id" \
+      "$active_port" \
+      "$mcp_runtime_api_key"
+    mcp_store_tunnel_credentials \
+      "$mcp_tunnel_id" \
+      "$mcp_runtime_api_key"
+    mcp_runtime_api_key=""
   fi
   mcp_emit_status "$workspace" "$container_name" "$workspace_hash" "$mcp_json"
 }
