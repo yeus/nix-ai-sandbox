@@ -256,7 +256,9 @@ Connect the current repository to ChatGPT through OpenAI Secure MCP Tunnel:
 ais mcp --tunnel
 ```
 
-The command stays in the foreground and shows Winx tool activity. Press
+The command stays in the foreground with Winx output hidden. Press `v` to show
+tool activity and shell output in the same terminal; press `v` again to hide it.
+Available shell scrollback is shown when you turn output back on. Press
 `Ctrl-C` to stop the tunnel and its dedicated MCP container. For background
 operation:
 
@@ -279,8 +281,9 @@ starts. The MCP container has its own persistent home directory and bridge
 network; it cannot see the normal sandbox home or host loopback services. The
 workspace and Nix storage remain mounted read/write so commands can work.
 
-The activity stream shows tool names and outcomes without command text or file
-contents. To watch a shell session's actual output from another terminal, run:
+Tool activity shows names and outcomes without command text or file contents.
+The `v` view also shows actual shell output from Winx sessions. To inspect or
+follow one specific session from another terminal, run:
 
 ```bash
 ais mcp --sessions

@@ -313,13 +313,8 @@ mcp_foreground_is_healthy() {
   local container="$1"
   local runtime_dir="$2"
   local runtime_container_dir="$3"
-  local activity_pid="$4"
   local tunnel_json
 
-  if ! kill -0 "$activity_pid" 2>/dev/null; then
-    echo "MCP activity stream stopped unexpectedly." >&2
-    return 1
-  fi
   tunnel_json="$(mcp_tunnel_status_json \
     "$container" "$runtime_dir" "$runtime_container_dir")"
   if [[ "$(jq -r '.process_running and .healthy and .ready' <<<"$tunnel_json")" != true ]]; then
@@ -328,42 +323,88 @@ mcp_foreground_is_healthy() {
   fi
 }
 
+mcp_show_shell_output() {
+  local container="$1"
+  local consumer="$2"
+  local binary="/sandbox-home/.local/share/ai-sandbox/mcp/winx/$AI_SANDBOX_MCP_VERSION/winx-code-agent"
+  local sessions session_id
+
+  # Winx starts its daemon when the first shell session is initialized.
+  sessions="$(podman exec "$container" "$binary" list 2>/dev/null)" || return 0
+  sessions="$(jq -r '.[].thread_id' <<<"$sessions")" || return 1
+  while IFS= read -r session_id; do
+    [[ -n "$session_id" ]] || continue
+    podman exec "$container" "$binary" \
+      attach "$session_id" --consumer "$consumer" >&2 || return 1
+  done <<<"$sessions"
+}
+
 mcp_supervise_tunnel() {
   local container="$1"
   local hash="$2"
   local runtime_dir runtime_container_dir
-  local activity_pid stop_signal="" result=0
+  local activity_pid="" stop_signal="" result=0 key=""
+  local consumer="ais-foreground-$BASHPID"
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
   runtime_container_dir="$(mcp_runtime_container_dir "$hash")"
 
   touch "$runtime_dir/runtime/usage.jsonl"
   chmod 0600 "$runtime_dir/runtime/usage.jsonl"
-  bash "$MCP_LIB_DIR/activity.sh" \
-    "$runtime_dir/runtime/usage.jsonl" >&2 &
-  activity_pid=$!
   trap 'stop_signal=INT' INT
   trap 'stop_signal=TERM' TERM
   trap 'stop_signal=HUP' HUP
 
   echo >&2
-  echo "MCP tool activity is shown below. Press Ctrl-C to stop." >&2
-  echo "For live shell output: ais mcp --sessions" >&2
+  if [[ -t 0 && -t 2 ]]; then
+    echo "Winx output hidden. Press v to show Winx output; press v again to hide it." >&2
+  else
+    echo "Winx output hidden. Use ais mcp --sessions to inspect shell sessions." >&2
+  fi
+  echo "Press Ctrl-C to stop MCP and the Secure Tunnel." >&2
   while [[ -z "$stop_signal" ]]; do
-    sleep 1 &
-    wait "$!" || true
+    key=""
+    if [[ -t 0 && -t 2 ]]; then
+      IFS= read -rsn1 -t 1 key || true
+      if [[ "$key" == v ]]; then
+        if [[ -n "$activity_pid" ]]; then
+          kill "$activity_pid" 2>/dev/null || true
+          wait "$activity_pid" 2>/dev/null || true
+          activity_pid=""
+          echo "Winx output hidden. Press v to show it again." >&2
+        else
+          bash "$MCP_LIB_DIR/activity.sh" \
+            "$runtime_dir/runtime/usage.jsonl" </dev/null >&2 &
+          activity_pid=$!
+          echo "Winx output visible. Press v to hide it." >&2
+          echo "Watching for Winx shell sessions..." >&2
+        fi
+      fi
+    else
+      sleep 1 &
+      wait "$!" || true
+    fi
     [[ -z "$stop_signal" ]] || break
 
+    if [[ -n "$activity_pid" ]]; then
+      if ! kill -0 "$activity_pid" 2>/dev/null; then
+        echo "Winx activity viewer stopped unexpectedly." >&2
+        activity_pid=""
+      elif ! mcp_show_shell_output "$container" "$consumer"; then
+        echo "Could not read Winx shell output." >&2
+      fi
+    fi
     if ! mcp_foreground_is_healthy \
-      "$container" "$runtime_dir" "$runtime_container_dir" \
-      "$activity_pid"; then
+      "$container" "$runtime_dir" "$runtime_container_dir"; then
       result=1
       break
     fi
   done
 
   trap - INT TERM HUP
-  kill "$activity_pid" 2>/dev/null || true
-  wait "$activity_pid" 2>/dev/null || true
+  if [[ -n "$activity_pid" ]]; then
+    kill "$activity_pid" 2>/dev/null || true
+    wait "$activity_pid" 2>/dev/null || true
+  fi
   echo "Stopping MCP and Secure Tunnel..." >&2
   if ! mcp_stop_process "$container" "$hash" 1; then
     result=1

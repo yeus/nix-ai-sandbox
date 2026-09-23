@@ -74,7 +74,13 @@ case "${1:-}" in
         fi
         ;;
       *ai-sandbox-mcp-tunnel-stop*) rm -f "$runtime/tunnel/running" ;;
-      *'winx-code-agent list'*) echo synthetic-thread-id ;;
+      *'winx-code-agent list'*)
+        if [[ ! -f "$AI_SANDBOX_TEST_ROOT/winx-ready" ]]; then
+          touch "$AI_SANDBOX_TEST_ROOT/list-before-ready"
+          exit 1
+        fi
+        echo '[{"thread_id":"synthetic-thread-id"}]'
+        ;;
       *'winx-code-agent attach'*) echo synthetic-shell-output ;;
     esac
     exit 0
@@ -157,6 +163,7 @@ rg -q 'Stop it before changing tunnels' "$test_root/change.err"
 jq -e '.implementation == "winx-code-agent" and .transport == "stdio" and .health == "ok" and .tunnel.ready' \
   "$test_root/status.json" >/dev/null
 
+touch "$test_root/winx-ready"
 "$ai_sandbox" mcp "$workspace" --sessions \
   >"$test_root/sessions.out"
 rg -q synthetic-thread-id "$test_root/sessions.out"
@@ -179,25 +186,77 @@ rg -q 'read-only and --ship are unavailable' "$test_root/change.err"
 jq -e '.health == "stopped" and (.tunnel.ready | not)' \
   "$test_root/stopped.json" >/dev/null
 
-# A foreground run remains attached and stops the container on termination.
-"$ai_sandbox" mcp "$workspace" --tunnel \
-  >"$test_root/foreground.out" \
-  2>"$test_root/foreground.err" &
+# A foreground run starts quiet and toggles Winx output from its own terminal.
+rm -f "$test_root/winx-ready"
+: >"$test_root/commands.log"
+mkfifo "$test_root/foreground.keys"
+script -q -f -c \
+  "sh -c 'echo \$\$ >\"$test_root/foreground.pid\"; exec \"$ai_sandbox\" mcp \"$workspace\" --tunnel'" \
+  "$test_root/foreground.out" \
+  <"$test_root/foreground.keys" \
+  >"$test_root/foreground.stdout" 2>&1 &
 foreground_pid=$!
+exec 9>"$test_root/foreground.keys"
 for _ in {1..40}; do
   [[ -f "$test_root/container-running" ]] && \
     [[ -f "$runtime/tunnel/running" ]] && \
-    rg -q 'MCP tool activity is shown below' \
-      "$test_root/foreground.err" && break
+    rg -q 'Press v to show Winx output' \
+      "$test_root/foreground.out" && break
   sleep 0.1
 done
 [[ -f "$runtime/tunnel/running" ]]
-kill -TERM "$foreground_pid"
-wait "$foreground_pid" || [[ "$?" -eq 143 ]]
+! rg -q synthetic-shell-output "$test_root/foreground.out"
+printf '%s\n' \
+  '{"timestamp":"hidden-event","fields":{"event":"tool_call","tool":"BashCommand","action":"command","outcome":"ok"}}' \
+  >>"$runtime/runtime/usage.jsonl"
+! rg -q hidden-event "$test_root/foreground.out"
+printf 'v' >&9
+for _ in {1..40}; do
+  rg -q 'winx-code-agent> <list>' "$test_root/commands.log" && break
+  sleep 0.1
+done
+rg -q 'winx-code-agent> <list>' "$test_root/commands.log"
+[[ -f "$test_root/list-before-ready" ]]
+sleep 0.2
+! rg -q synthetic-shell-output "$test_root/foreground.out"
+! rg -q 'Could not read Winx shell output' "$test_root/foreground.out"
+printf '%s\n' \
+  '{"timestamp":"visible-event","fields":{"event":"tool_call","tool":"BashCommand","action":"command","outcome":"ok"}}' \
+  >>"$runtime/runtime/usage.jsonl"
+for _ in {1..40}; do
+  rg -q visible-event "$test_root/foreground.out" && break
+  sleep 0.1
+done
+rg -q visible-event "$test_root/foreground.out"
+touch "$test_root/winx-ready"
+for _ in {1..40}; do
+  rg -q synthetic-shell-output "$test_root/foreground.out" && break
+  sleep 0.1
+done
+rg -q synthetic-shell-output "$test_root/foreground.out"
+printf 'v' >&9
+for _ in {1..40}; do
+  rg -q 'Press v to show it again' "$test_root/foreground.out" && break
+  sleep 0.1
+done
+rg -q 'Press v to show it again' "$test_root/foreground.out"
+printf '%s\n' \
+  '{"timestamp":"after-hide","fields":{"event":"tool_call","tool":"BashCommand","action":"command","outcome":"ok"}}' \
+  >>"$runtime/runtime/usage.jsonl"
+attach_count="$(rg -c 'winx-code-agent> <attach>' "$test_root/commands.log")"
+sleep 1.5
+[[ "$(rg -c 'winx-code-agent> <attach>' "$test_root/commands.log")" -eq "$attach_count" ]]
+! rg -q after-hide "$test_root/foreground.out"
+kill -TERM "$(<"$test_root/foreground.pid")"
+wait "$foreground_pid" || true
 foreground_pid=""
+exec 9>&-
 [[ ! -f "$test_root/container-running" ]]
-rg -q 'MCP tool activity is shown below' \
-  "$test_root/foreground.err"
+rg -q 'Stopping MCP and Secure Tunnel' \
+  "$test_root/foreground.out"
+! rg -q 'Could not read Winx shell output' \
+  "$test_root/foreground.out"
+! rg -q hidden-event "$test_root/foreground.out"
 
 # Activity output includes the tool and outcome, but omits arguments.
 : >"$test_root/usage.jsonl"
