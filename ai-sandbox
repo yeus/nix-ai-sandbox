@@ -30,10 +30,12 @@ Usage:
   ai-sandbox serve [WORKSPACE] [--instance NAME] --stop
     Start or stop browser-based code-server on a stable loopback port.
 
-  ai-sandbox mcp [WORKSPACE] [--read-only|--ship] [--local|--tunnel [TUNNEL_ID]] [--port PORT]
+  ai-sandbox mcp [WORKSPACE] --tunnel [TUNNEL_ID] [--detach]
   ai-sandbox mcp [WORKSPACE] --status [--json]
   ai-sandbox mcp [WORKSPACE] --stop [--json]
-    Start, inspect, or stop policy-controlled local HTTP MCP access.
+  ai-sandbox mcp [WORKSPACE] --sessions
+  ai-sandbox mcp [WORKSPACE] --attach THREAD_ID
+    Start, inspect, or stop Winx MCP with sandboxed Bash access.
 
   ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--android|--emulator|--android-emulator] [--android-gpu] [-- COMMAND [ARGS...]]
     Start/attach the sandbox and open an interactive shell (or run command after --).
@@ -931,6 +933,10 @@ mcp_local_selected=0
 mcp_tunnel_selected=0
 mcp_tunnel_id=""
 mcp_runtime_api_key=""
+mcp_detach=0
+mcp_sessions=0
+mcp_attach_id=""
+network_selected=0
 android_mode=0
 emulator_mode=0
 android_gpu=0
@@ -1027,6 +1033,7 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 ]] || { echo "--network requires host or bridge" >&2; exit 1; }
       NETWORK_MODE="$1"
+      network_selected=1
       shift
       ;;
     --android)
@@ -1126,6 +1133,23 @@ while [[ $# -gt 0 ]]; do
         mcp_tunnel_id="$1"
         shift
       fi
+      ;;
+    --detach)
+      [[ "$cmd" == "mcp" ]] || { echo "--detach is only valid with mcp" >&2; exit 1; }
+      mcp_detach=1
+      shift
+      ;;
+    --sessions)
+      [[ "$cmd" == "mcp" ]] || { echo "--sessions is only valid with mcp" >&2; exit 1; }
+      mcp_sessions=1
+      shift
+      ;;
+    --attach)
+      [[ "$cmd" == "mcp" ]] || { echo "--attach is only valid with mcp" >&2; exit 1; }
+      shift
+      [[ $# -gt 0 ]] || { echo "--attach requires a thread ID" >&2; exit 1; }
+      mcp_attach_id="$1"
+      shift
       ;;
     --read-only|--ship)
       [[ "$cmd" == "mcp" ]] || { echo "$1 is only valid with mcp" >&2; exit 1; }
@@ -1265,9 +1289,23 @@ if [[ "$mcp_status" -eq 1 && "$mcp_stop" -eq 1 ]]; then
   exit 1
 fi
 
+if [[ "$mcp_detach" -eq 1 && "$mcp_tunnel_selected" -ne 1 ]]; then
+  echo "mcp --detach requires --tunnel." >&2
+  exit 1
+fi
+
+if [[ "$cmd" == mcp && ( "$mcp_sessions" -eq 1 || -n "$mcp_attach_id" ) ]] &&
+  { [[ "$mcp_sessions" -eq 1 && -n "$mcp_attach_id" ]] ||
+    [[ "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 || "$mcp_tunnel_selected" -eq 1 ||
+       "$mcp_detach" -eq 1 || "$mcp_json" -eq 1 || "$mcp_mode_selected" -eq 1 ]]; }; then
+  echo "MCP session commands cannot be combined with start, status, or stop options." >&2
+  exit 1
+fi
+
 if [[ "$cmd" == "mcp" && ( "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 ) ]] &&
   { [[ "$mcp_mode_selected" -eq 1 ]] || [[ -n "$mcp_port" ]] ||
-    [[ "$mcp_local_selected" -eq 1 ]] || [[ "$mcp_tunnel_selected" -eq 1 ]]; }; then
+    [[ "$mcp_local_selected" -eq 1 ]] || [[ "$mcp_tunnel_selected" -eq 1 ]] ||
+    [[ "$mcp_detach" -eq 1 ]]; }; then
   echo "MCP transport, mode, and port options cannot be combined with --status or --stop." >&2
   exit 1
 fi
@@ -1282,9 +1320,24 @@ if [[ "$cmd" == "serve" && "$NETWORK_MODE" != "host" ]]; then
   exit 1
 fi
 
-if [[ "$cmd" == "mcp" && "$NETWORK_MODE" != "host" ]]; then
-  echo "ai-sandbox mcp requires host networking for loopback-only HTTP access." >&2
-  exit 1
+if [[ "$cmd" == "mcp" ]]; then
+  if [[ "$network_selected" -eq 1 && "$NETWORK_MODE" != bridge ]]; then
+    echo "ai-sandbox mcp uses bridge networking; host networking is unavailable." >&2
+    exit 1
+  fi
+  NETWORK_MODE=bridge
+  if [[ -n "$mcp_port" || "$mcp_local_selected" -eq 1 ]]; then
+    echo "MCP uses stdio through Secure Tunnel; --port and --local are unavailable." >&2
+    exit 1
+  fi
+  if [[ "$mcp_mode_selected" -eq 1 ]]; then
+    echo "Winx stdio exposes Bash; --read-only and --ship are unavailable." >&2
+    exit 1
+  fi
+  if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 && "$mcp_sessions" -eq 0 && -z "$mcp_attach_id" && "$mcp_tunnel_selected" -eq 0 ]]; then
+    echo "Start Winx MCP with: ais mcp --tunnel" >&2
+    exit 1
+  fi
 fi
 
 if [[ "$android_mode" -eq 1 && "$NETWORK_MODE" != "host" ]]; then
@@ -1555,7 +1608,8 @@ case "$cmd" in
     [[ "$server_stop" -eq 1 ]] || ensure_image_exists
     ;;
   mcp)
-    if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 ]]; then
+    if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 &&
+      "$mcp_sessions" -eq 0 && -z "$mcp_attach_id" ]]; then
       ensure_image_exists
     fi
     ;;
@@ -1636,7 +1690,7 @@ if [[ "$cmd" == "shell" || "$cmd" == "warm" || "$cmd" == "exec" ]]; then
 elif [[ "$cmd" == "serve" ]]; then
   launch_context="code-server"
 elif [[ "$cmd" == "mcp" ]]; then
-  launch_context="workspace"
+  launch_context="mcp"
 elif [[ "$cmd" == "android-doctor" ]]; then
   launch_context="android-doctor"
 fi
@@ -1685,6 +1739,27 @@ if [[ "$cmd" == "mcp" && "$mcp_stop" -eq 1 ]]; then
     mcp_emit_status "$workspace" "$container_name" "$workspace_hash" 1
   fi
   exit "$mcp_stop_rc"
+fi
+
+if [[ "$cmd" == "mcp" && "$mcp_sessions" -eq 1 ]]; then
+  if ! container_is_running "$container_name"; then
+    echo "MCP container is not running." >&2
+    exit 1
+  fi
+  podman exec "$container_name" \
+    "/sandbox-home/.local/share/ai-sandbox/mcp/winx/$AI_SANDBOX_MCP_VERSION/winx-code-agent" list
+  echo "Follow one with: ais mcp --attach THREAD_ID"
+  exit 0
+fi
+
+if [[ "$cmd" == "mcp" && -n "$mcp_attach_id" ]]; then
+  if ! container_is_running "$container_name"; then
+    echo "MCP container is not running." >&2
+    exit 1
+  fi
+  exec podman exec -it "$container_name" \
+    "/sandbox-home/.local/share/ai-sandbox/mcp/winx/$AI_SANDBOX_MCP_VERSION/winx-code-agent" \
+    attach "$mcp_attach_id" --follow
 fi
 
 code_server_port=""
@@ -1743,10 +1818,9 @@ container_mode="$cmd"
 mcp_mount_args=()
 if [[ "$cmd" == "mcp" ]]; then
   mcp_runtime_host="$(mcp_runtime_host_dir "$workspace_hash")"
-  mkdir -p "$mcp_runtime_host/upstream-runtime" "$mcp_runtime_host/runtime"
-  mcp_mount_args=(
-    -v "$mcp_runtime_host/upstream-runtime:/workspace/.chatgpt${selinux_label_opt}"
-  )
+  mkdir -p "$mcp_runtime_host/runtime"
+  chmod 0700 "$mcp_runtime_host"
+  home_mount_spec="$mcp_runtime_host:/sandbox-home${selinux_label_opt}"
 fi
 
 android_args=()
@@ -1922,7 +1996,7 @@ run_exec() {
 }
 
 run_mcp() {
-  local existing_state actual_network runtime_dir lock_file active_port tunnel_json
+  local existing_state actual_network runtime_dir lock_file tunnel_json existing_mode existing_version legacy_container new_tunnel=0
   runtime_dir="$(mcp_runtime_host_dir "$workspace_hash")"
   lock_file="$runtime_dir/runtime/lock"
   mkdir -p "$(dirname "$lock_file")"
@@ -1933,6 +2007,7 @@ run_mcp() {
     return 1
   fi
 
+  legacy_container="ai-sandbox-${project_slug}-workspace-${workspace_hash}-default"
   existing_state="$(podman inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
   if [[ "$existing_state" == "running" ]]; then
     echo "Reusing sandbox workspace container $container_name..." >&2
@@ -1947,36 +2022,57 @@ run_mcp() {
       "$IMAGE" >/dev/null
   fi
 
-  actual_network="$(container_network_mode "$container_name")"
-  if [[ "$actual_network" != host ]]; then
-    echo "MCP requires a host-networked workspace container; found $actual_network." >&2
+  actual_network="$(podman inspect -f '{{.HostConfig.NetworkMode}}' "$container_name")"
+  if [[ "$actual_network" == host ]]; then
+    echo "MCP container uses host networking; recreate it with bridge networking." >&2
     return 1
   fi
-  if [[ "$mcp_local_selected" -eq 1 ]]; then
-    tunnel_json="$(mcp_tunnel_status_json \
-      "$container_name" "$runtime_dir" \
-      "$(mcp_runtime_container_dir "$workspace_hash")")"
-    if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" == true ]]; then
-      echo "Secure MCP Tunnel is already running for this workspace." >&2
-      echo "Stop it before switching to local-only transport." >&2
-      return 1
-    fi
+  tunnel_json="$(mcp_tunnel_status_json \
+    "$container_name" "$runtime_dir" \
+    "$(mcp_runtime_container_dir "$workspace_hash")")"
+  existing_mode="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" mode)"
+  existing_version="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" version)"
+  if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" == true &&
+    -n "$existing_version" && "$existing_version" != "$AI_SANDBOX_MCP_VERSION" ]]; then
+    echo "MCP is running Winx $existing_version; stop it before upgrading." >&2
+    return 1
   fi
-  mcp_start_process "$workspace" "$container_name" "$workspace_hash" "$mcp_mode" "$mcp_port"
-  if [[ -n "$mcp_tunnel_id" ]]; then
-    active_port="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" port)"
-    mcp_start_tunnel \
-      "$container_name" \
-      "$workspace_hash" \
-      "$mcp_tunnel_id" \
-      "$active_port" \
-      "$mcp_runtime_api_key"
-    mcp_store_tunnel_credentials \
-      "$mcp_tunnel_id" \
-      "$mcp_runtime_api_key"
-    mcp_runtime_api_key=""
+  if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" == true &&
+    -n "$existing_mode" && "$existing_mode" != "$mcp_mode" ]]; then
+    echo "MCP is already running with mode=$existing_mode." >&2
+    echo "Stop it before changing mode." >&2
+    return 1
   fi
+  if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" != true ]]; then
+    new_tunnel=1
+    trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 130' INT
+    trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 143' TERM
+    trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 129' HUP
+  fi
+  if ! mcp_start_tunnel \
+    "$container_name" "$workspace_hash" \
+    "$mcp_tunnel_id" "$mcp_runtime_api_key" \
+    "$legacy_container"; then
+    trap - INT TERM HUP
+    [[ "$new_tunnel" -eq 0 ]] || mcp_stop_process "$container_name" "$workspace_hash" 1 || true
+    return 1
+  fi
+  mcp_write_metadata \
+    "$runtime_dir/runtime/metadata.json" \
+    "$(mcp_container_id "$container_name")" "$mcp_mode"
+  if ! mcp_store_tunnel_credentials \
+    "$mcp_tunnel_id" "$mcp_runtime_api_key"; then
+    trap - INT TERM HUP
+    [[ "$new_tunnel" -eq 0 ]] || mcp_stop_process "$container_name" "$workspace_hash" 1 || true
+    return 1
+  fi
+  mcp_runtime_api_key=""
   mcp_emit_status "$workspace" "$container_name" "$workspace_hash" "$mcp_json"
+  if [[ "$mcp_tunnel_selected" -eq 1 && "$mcp_detach" -eq 0 ]]; then
+    flock -u 8
+    mcp_supervise_tunnel "$container_name" "$workspace_hash"
+  fi
+  trap - INT TERM HUP
 }
 
 run_install() {

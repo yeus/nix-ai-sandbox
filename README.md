@@ -248,34 +248,20 @@ Browser-editor profiles and extensions are separate from desktop VS Code
 profiles because code-server extension compatibility differs. Repository
 `.vscode` configuration remains shared through the workspace mount.
 
-## Local workspace MCP
+## Workspace MCP
 
-Start policy-controlled MCP access for the current repository:
-
-```bash
-cd ~/git/my-project
-ais mcp
-```
-
-The server runs inside a persistent sandbox workspace container and exposes one
-repository with the ID `workspace`. Its repository root is exactly
-`/workspace`. The HTTP endpoint listens on host loopback and defaults to
-`write` mode.
-
-Choose a narrower read-only policy or explicitly enable reviewed local Git
-completion operations:
-
-```bash
-ais mcp --read-only
-ais mcp --ship
-ais mcp --local
-```
-
-To connect the loopback-only server to ChatGPT through OpenAI Secure MCP
-Tunnel, run:
+Connect the current repository to ChatGPT through OpenAI Secure MCP Tunnel:
 
 ```bash
 ais mcp --tunnel
+```
+
+The command stays in the foreground and shows Winx tool activity. Press
+`Ctrl-C` to stop the tunnel and its dedicated MCP container. For background
+operation:
+
+```bash
+ais mcp --tunnel --detach
 ```
 
 On first use, `ais` links directly to the OpenAI pages where you create a Secure
@@ -286,22 +272,32 @@ or metadata. Later `ais mcp --tunnel` invocations reuse the saved values. You
 can also provide a tunnel ID explicitly with `--tunnel TUNNEL_ID`; it is saved
 after the runtime key is available.
 
-The runtime key is exposed only to the tunnel-client launch process. The
-pinned, checksum-verified tunnel client runs inside the workspace container and
-keeps its profile, logs, and runtime state in the workspace's sandbox-owned MCP
-storage. Startup reports success only after the tunnel is connected and ready.
+The pinned, checksum-verified tunnel client launches pinned Winx over stdio.
+Winx exposes a persistent Bash shell plus file reading and editing tools rooted
+at `/workspace`. The tunnel key is removed from Winx's environment before it
+starts. The MCP container has its own persistent home directory and bridge
+network; it cannot see the normal sandbox home or host loopback services. The
+workspace and Nix storage remain mounted read/write so commands can work.
 
-An active tunnel is never switched or disabled implicitly: stop it first before
-using `--local` or a different tunnel ID. `--status` reports both local MCP and
-tunnel health, while `--stop` stops both processes without stopping the
-container and fails loudly if the tunnel keeps running.
+The activity stream shows tool names and outcomes without command text or file
+contents. To watch a shell session's actual output from another terminal, run:
+
+```bash
+ais mcp --sessions
+ais mcp --attach THREAD_ID
+```
+
+An active tunnel is never switched implicitly: stop it before selecting a
+different tunnel ID. `--status` reports tunnel health, and `--stop` stops the
+tunnel and dedicated container. On first use after the old `gpt-repo-mcp`
+integration, the launcher stops the old MCP container before connecting Winx.
 
 In ChatGPT developer mode, create an app using **Tunnel** as the connection and
 select the same tunnel ID. The tunnel must be associated with the target
 ChatGPT workspace and the runtime-key principal needs Tunnels Read + Use.
 See the [OpenAI Secure MCP Tunnel documentation](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
 
-Inspect or stop the MCP process without stopping its sandbox container:
+Inspect or stop MCP:
 
 ```bash
 ais mcp --status
@@ -309,23 +305,11 @@ ais mcp --status --json
 ais mcp --stop
 ```
 
-Choose a port when starting a stopped service:
-
-```bash
-ais mcp --port 8787
-```
-
-The assigned port remains stable for the workspace. A requested port collision
-is reported without stopping the process that owns the port. Changing the mode
-or port requires `ais mcp --stop` first.
-
-Installation, generated configuration, logs, and upstream `.chatgpt` working
-artifacts stay in persistent sandbox storage. No MCP configuration is added to
-the project. Submodule workspaces whose normal sandbox mount includes a parent
-repository are rejected; start MCP from the mounted top-level repository.
-
-The current implementation dependency is a pinned `gpt-repo-mcp` revision.
-The `ais mcp` command and local HTTP boundary are the supported interface.
+Installation, tunnel state, and privacy-safe usage logs stay under the dedicated
+MCP home in sandbox storage. No MCP configuration is added to the project.
+Submodule workspaces whose normal sandbox mount includes a parent repository
+are rejected; start MCP from the mounted top-level repository. The pinned Winx
+release currently supports Linux x86-64; other architectures fail clearly.
 
 Open an interactive shell in the sandbox:
 

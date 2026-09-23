@@ -4,7 +4,7 @@ set -euo pipefail
 runtime_dir="${1:?runtime directory is required}"
 version="${2:?tunnel-client version is required}"
 tunnel_id="${3:?tunnel ID is required}"
-port="${4:?MCP port is required}"
+winx_version="${4:?Winx version is required}"
 : "${CONTROL_PLANE_API_KEY:?CONTROL_PLANE_API_KEY is required}"
 
 case "$(uname -m)" in
@@ -35,7 +35,7 @@ if ! "$client" runtimes connect --json \
   --profile-dir "$profile_dir" \
   --tunnel-id "$tunnel_id" \
   --runtime-api-key env:CONTROL_PLANE_API_KEY \
-  --mcp-server-url "http://127.0.0.1:$port/mcp" \
+  --mcp-command "/usr/local/bin/ai-sandbox-mcp-launch $winx_version" \
   >"$result"; then
   jq '{tunnel_id, process_running, healthy, ready, error, launch_diagnostics}' \
     "$result" >&2 2>/dev/null || true
