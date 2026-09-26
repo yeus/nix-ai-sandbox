@@ -19,6 +19,7 @@ git -C "$workspace" init -q
 export AI_SANDBOX_STATE_DIR="$test_root/state"
 export AI_SANDBOX_HOME_STORAGE="$test_root/home"
 export AI_SANDBOX_NIX_STORAGE="$test_root/nix"
+export AI_SANDBOX_TMP_ROOT="$test_root/host-tmp"
 export AI_SANDBOX_AUTO_RECONNECT=0
 export AI_SANDBOX_TEST_ROOT="$test_root"
 export PATH="$test_root/bin:/usr/bin:/bin"

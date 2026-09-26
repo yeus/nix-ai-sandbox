@@ -39,6 +39,7 @@ So instead of trusting every coding-agent plugin, you isolate the whole editor e
 - builds one global Ubuntu image with real Microsoft VS Code and Nix
 - uses bind-mounted host directories for `/nix` and sandbox home (defaults: `~/.cache/ai-sandbox/nix` and `~/.cache/ai-sandbox/home`)
 - mounts the current project at `/workspace`
+- mounts `/tmp/ais/<container-name>` from the host at `/tmp` inside each container
 - if the project is a Git submodule, mounts the top superproject at `/workspace` and opens the submodule path inside it (preserves nested submodule `.git` path resolution)
 - if a flake is available, launches via `nix develop`
 - if no flake is available, launches plain VS Code / plain shell
@@ -50,6 +51,19 @@ In practice, that means:
 - you can just run `ais` or `ai-sandbox` inside a flake-enabled repository
 - the sandbox reuses a shared `/nix` cache across projects
 - VS Code, extensions, and coding agents run inside the container instead of directly on your host
+
+Temporary files created inside a sandbox are visible on the host under
+`/tmp/ais/<container-name>/`. Each container has its own directory, so
+unrelated workspaces and instances do not share `/tmp`. The `/tmp/ais` parent
+is user-owned and private (`0700`); each mounted directory has normal `/tmp`
+permissions (`1777`). These files persist while the host keeps them and are
+not removed by `ai-sandbox` when a container stops. Treat them as potentially
+sensitive, and do not publish them without reviewing their contents.
+
+Existing containers keep their original mounts. Recreate a container before
+expecting its `/tmp` to appear on the host. `ai-sandbox reset-container .`
+removes all containers for the current workspace, but does not remove
+`/tmp/ais` files. This also discards any state stored only in those containers.
 
 ## Everyday use
 

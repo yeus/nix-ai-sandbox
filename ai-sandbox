@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_CONTEXT="${AI_SANDBOX_BUILD_CONTEXT:-$SCRIPT_DIR}"
 STATE_DIR="${AI_SANDBOX_STATE_DIR:-$HOME/.local/state/ai-sandbox}"
 ANDROID_STATE_DIR="${AI_SANDBOX_ANDROID_STATE_DIR:-$HOME/.cache/ai-sandbox/android}"
+TMP_ROOT="${AI_SANDBOX_TMP_ROOT:-/tmp/ais}"
 NETWORK_MODE="${AI_SANDBOX_NETWORK_MODE:-host}"
 MCP_LIB_DIR="${AI_SANDBOX_MCP_LIB_DIR:-$SCRIPT_DIR/mcp}"
 
@@ -276,6 +277,37 @@ storage_mount_spec() {
   else
     printf '%s:%s%s,U\n' "$storage" "$target" "$selinux_label_opt"
   fi
+}
+
+prepare_tmp_mount() {
+  local root="$1" container="$2" container_tmp
+  if [[ "$root" != /* || "$root" == / || -L "$root" ]]; then
+    echo "Refusing unsafe host temp root: $root" >&2
+    return 1
+  fi
+  if [[ ! -e "$root" ]]; then
+    mkdir -m 0700 -- "$root"
+  fi
+  if [[ ! -d "$root" || "$(stat -c %u "$root")" != "$(id -u)" ||
+    "$(stat -c %a "$root")" != 700 ]]; then
+    echo "Refusing unsafe host temp root: $root (expected a user-owned 0700 directory)" >&2
+    return 1
+  fi
+
+  container_tmp="$root/$container"
+  if [[ -L "$container_tmp" ]]; then
+    echo "Refusing symlinked host temp directory: $container_tmp" >&2
+    return 1
+  fi
+  if [[ ! -e "$container_tmp" ]]; then
+    mkdir -m 1777 -- "$container_tmp"
+  fi
+  if [[ ! -d "$container_tmp" || "$(stat -c %u "$container_tmp")" != "$(id -u)" ||
+    "$(stat -c %a "$container_tmp")" != 1777 ]]; then
+    echo "Refusing unsafe host temp directory: $container_tmp (expected a user-owned 1777 directory)" >&2
+    return 1
+  fi
+  printf '%s\n' "$container_tmp"
 }
 
 require_safe_storage_path() {
@@ -1823,6 +1855,8 @@ if [[ "$cmd" == "mcp" ]]; then
   home_mount_spec="$mcp_runtime_host:/sandbox-home${selinux_label_opt}"
 fi
 
+tmp_host_dir="$(prepare_tmp_mount "$TMP_ROOT" "$container_name")"
+
 android_args=()
 emulator_device_args=()
 if [[ "$android_mode" -eq 1 ]]; then
@@ -1880,6 +1914,7 @@ common_args=(
   -v "$mount_root:/workspace${selinux_label_opt}"
   -v "$home_mount_spec"
   -v "$nix_mount_spec"
+  -v "$tmp_host_dir:/tmp${selinux_label_opt}"
   "${mcp_mount_args[@]}"
   "${android_args[@]}"
   "${emulator_device_args[@]}"
