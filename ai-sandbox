@@ -1853,6 +1853,17 @@ if [[ "$cmd" == "mcp" ]]; then
   mkdir -p "$mcp_runtime_host/runtime"
   chmod 0700 "$mcp_runtime_host"
   home_mount_spec="$mcp_runtime_host:/sandbox-home${selinux_label_opt}"
+  if [[ -f "$HOME_STORAGE/.codex/AGENTS.md" ]]; then
+    mkdir -p "$mcp_runtime_host/.codex"
+    if [[ ! -f "$mcp_runtime_host/.codex/AGENTS.md" ]]; then
+      cp "$HOME_STORAGE/.codex/AGENTS.md" "$mcp_runtime_host/.codex/AGENTS.md"
+    fi
+    mcp_agents_mount_opts="ro"
+    [[ -z "$selinux_label_opt" ]] || mcp_agents_mount_opts+=",Z"
+    mcp_mount_args=(
+      -v "$HOME_STORAGE/.codex/AGENTS.md:/sandbox-home/.codex/AGENTS.md:$mcp_agents_mount_opts"
+    )
+  fi
 fi
 
 tmp_host_dir="$(prepare_tmp_mount "$TMP_ROOT" "$container_name")"

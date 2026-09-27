@@ -365,6 +365,13 @@ starts. The MCP container has its own persistent home directory and bridge
 network; it cannot see the normal sandbox home or host loopback services. The
 workspace and Nix storage remain mounted read/write so commands can work.
 
+Winx asks the calling AI to read the workspace's `AGENTS.md` and the Codex
+instructions at `/sandbox-home/.codex/AGENTS.md` after initialization. If the
+normal sandbox has a global Codex `AGENTS.md`, MCP mounts that one file read-only
+at the same path; otherwise its separate home uses the image's default copy.
+Nested workspace `AGENTS.md` files should be read when relevant. These are MCP
+guidance for the calling AI, not enforced rules.
+
 Installation, tunnel state, and privacy-safe usage logs stay under the dedicated
 MCP home in sandbox storage. No MCP configuration is added to the project.
 Submodule workspaces whose normal sandbox mount includes a parent repository

@@ -23,6 +23,9 @@ export AI_SANDBOX_TMP_ROOT="$test_root/host-tmp"
 export AI_SANDBOX_AUTO_RECONNECT=0
 export AI_SANDBOX_TEST_ROOT="$test_root"
 export PATH="$test_root/bin:/usr/bin:/bin"
+mkdir -p "$AI_SANDBOX_HOME_STORAGE/.codex"
+printf 'Synthetic sandbox instructions.\n' \
+  >"$AI_SANDBOX_HOME_STORAGE/.codex/AGENTS.md"
 cat >"$test_root/bin/secret-tool" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -127,6 +130,10 @@ rg -q '<--network> <host>|<--privileged>' "$test_root/commands.log" && {
 }
 runtime="$(find "$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp-winx" -mindepth 1 -maxdepth 1 -type d | head -1)"
 rg -F "<$runtime:/sandbox-home>" "$test_root/commands.log" >/dev/null
+cmp "$AI_SANDBOX_HOME_STORAGE/.codex/AGENTS.md" \
+  "$runtime/.codex/AGENTS.md"
+rg -F "<$AI_SANDBOX_HOME_STORAGE/.codex/AGENTS.md:/sandbox-home/.codex/AGENTS.md:ro>" \
+  "$test_root/commands.log" >/dev/null
 if rg -F "<$AI_SANDBOX_HOME_STORAGE:/sandbox-home>" \
   "$test_root/commands.log"; then
   echo "MCP inherited the shared sandbox home" >&2
