@@ -18,4 +18,5 @@ export WINX_USAGE_LOG_ROTATION=never
 export WINX_ALLOW_PATHS=/sandbox-home/.codex/AGENTS.md
 export WINX_SERVER_INSTRUCTIONS="After Initialize, use ReadFiles to read /sandbox-home/.codex/AGENTS.md and /workspace/AGENTS.md if present, then any nested AGENTS.md relevant to the files you work on. Follow those instructions when using this sandbox."
 unset CONTROL_PLANE_API_KEY
-exec "$binary" serve
+exec env AI_SANDBOX_MODE=mcp-exec \
+  /usr/local/bin/container-entrypoint.sh "$binary" serve

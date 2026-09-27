@@ -361,9 +361,10 @@ another ID; stop it before starting with a different one.
 The pinned, checksum-verified tunnel client launches pinned Winx over stdio.
 Winx exposes a persistent Bash shell plus file reading and editing tools rooted
 at `/workspace`. The tunnel key is removed from Winx's environment before it
-starts. The default MCP container has its own persistent home directory and bridge
-network; it cannot see the normal sandbox home or host loopback services. The
-workspace and Nix storage remain mounted read/write so commands can work.
+starts. The MCP container has its own persistent home directory. It uses bridge
+networking by default, so it cannot see the normal sandbox home or host loopback
+services. The workspace and Nix storage remain mounted read/write so commands
+can work.
 
 Winx asks the calling AI to read the workspace's `AGENTS.md` and the Codex
 instructions at `/sandbox-home/.codex/AGENTS.md` after initialization. If the
@@ -373,28 +374,27 @@ uses the image's default copy.
 Nested workspace `AGENTS.md` files should be read when relevant. These are MCP
 guidance for the calling AI, not enforced rules.
 
-To use an emulator already running inside an ai-sandbox container, start MCP
-from the same workspace with:
+To control an emulator through the host adb server, give the dedicated MCP
+container Android access:
 
 ```bash
-ai-sandbox start . --emulator
-ais mcp --tunnel --reuse-emulator
+ais mcp --tunnel --android
 ```
 
-This mode requires exactly one running `--emulator` or `--emulator
---android-gpu` container for the workspace. It starts Winx and the tunnel in
-that container and leaves the container running when MCP stops. Winx can use
-the container's Android state, host-network adb connection, and KVM device.
-Android tools supplied by the project flake can be run from Winx with
-`nix develop . --command adb devices`. The calling AI also has the container's
-normal home and network access in this mode. Run `ais mcp --stop` to stop only
-the MCP tunnel; later status and session commands find the reused container
-automatically.
+This keeps MCP's separate home and uses host networking so
+`ADB_SERVER_SOCKET=tcp:127.0.0.1:5037` reaches the same adb server as the
+normal Android sandbox. It does not need KVM to control an emulator that is
+already running.
 
-In the default mode, installation, tunnel state, and privacy-safe usage logs
-stay under the dedicated MCP home. In reuse mode, installation uses the normal
-sandbox home and tunnel state and logs stay in its workspace-specific
-`.ai-sandbox/mcp-winx/` directory. No MCP configuration is added to the project.
+To start an emulator inside the MCP container itself, use
+`ais mcp --tunnel --emulator`. This also mounts the Android state directory and
+passes `/dev/kvm`; `--android-gpu` optionally passes `/dev/dri`. The flag does
+not start an AVD automatically. Winx starts in the project's Nix dev shell
+when one is available, so its commands can use the same Android tools as
+`ais shell --emulator`. Stop MCP before changing Android modes.
+
+Installation, tunnel state, and privacy-safe usage logs stay under the
+dedicated MCP home in sandbox storage. No MCP configuration is added to the project.
 Submodule workspaces whose normal sandbox mount includes a parent repository
 are rejected; start MCP from the mounted top-level repository. The pinned Winx
 release currently supports Linux x86-64; other architectures fail clearly.

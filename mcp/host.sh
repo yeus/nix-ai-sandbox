@@ -121,28 +121,6 @@ mcp_runtime_container_dir() {
   fi
 }
 
-mcp_find_running_emulator_container() {
-  local workspace_path="$1"
-  local -a candidates=()
-  mapfile -t candidates < <(
-    podman ps --filter label=ai-sandbox=true \
-      --filter "label=ai-sandbox.workspace=$workspace_path" \
-      --filter label=ai-sandbox.profile=emulator --format '{{.Names}}'
-    podman ps --filter label=ai-sandbox=true \
-      --filter "label=ai-sandbox.workspace=$workspace_path" \
-      --filter label=ai-sandbox.profile=emulator-gpu --format '{{.Names}}'
-  )
-  if [[ "${#candidates[@]}" -eq 0 ]]; then
-    echo "No running emulator-enabled ai-sandbox container for $workspace_path." >&2
-    return 1
-  fi
-  if [[ "${#candidates[@]}" -ne 1 ]]; then
-    echo "Multiple emulator-enabled containers are running for this workspace; stop all but one." >&2
-    return 1
-  fi
-  printf '%s\n' "${candidates[0]}"
-}
-
 mcp_container_id() {
   podman inspect -f '{{.Id}}' "$1" 2>/dev/null || true
 }
@@ -263,11 +241,12 @@ mcp_emit_status() {
   local container="$2"
   local hash="$3"
   local json_output="$4"
-  local runtime_dir runtime_container_dir metadata mode health tunnel_json tunnel_ui
+  local runtime_dir runtime_container_dir metadata mode profile health tunnel_json tunnel_ui
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
   runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
   metadata="$runtime_dir/runtime/metadata.json"
   mode="$(mcp_read_metadata_field "$metadata" mode)"
+  profile="$(mcp_read_metadata_field "$metadata" profile)"
   tunnel_json="$(mcp_tunnel_status_json \
     "$container" "$runtime_dir" "$runtime_container_dir")"
   health=stopped
@@ -282,13 +261,14 @@ mcp_emit_status() {
       --arg workspace "$workspace_path" \
       --arg container "$container" \
       --arg mode "$mode" \
+      --arg profile "$profile" \
       --argjson reuse_emulator "${mcp_reuse_emulator:-0}" \
       --arg implementation "$AI_SANDBOX_MCP_IMPLEMENTATION" \
       --arg version "$AI_SANDBOX_MCP_VERSION" \
       --arg transport "stdio" \
       --arg health "$health" \
       --argjson tunnel "$tunnel_json" \
-      '{workspace: $workspace, container: $container, reuse_emulator: ($reuse_emulator == 1), mode: ($mode | if length > 0 then . else null end), implementation: $implementation, version: $version, transport: $transport, endpoint: null, health: $health, tunnel: $tunnel}'
+      '{workspace: $workspace, container: $container, profile: ($profile | if length > 0 then . else null end), reuse_emulator: ($reuse_emulator == 1), mode: ($mode | if length > 0 then . else null end), implementation: $implementation, version: $version, transport: $transport, endpoint: null, health: $health, tunnel: $tunnel}'
     return
   fi
 
@@ -296,6 +276,7 @@ mcp_emit_status() {
   echo
   echo "Workspace: $workspace_path"
   echo "Container: $container"
+  [[ -z "$profile" ]] || echo "Profile: $profile"
   [[ "${mcp_reuse_emulator:-0}" -eq 0 ]] || echo "Reusing emulator container: yes"
   echo "Mode: ${mode:-unknown}"
   echo "Implementation: $AI_SANDBOX_MCP_IMPLEMENTATION @ $AI_SANDBOX_MCP_VERSION"
@@ -455,15 +436,17 @@ mcp_write_metadata() {
   local mode="$3"
   local container="$4"
   local reuse_emulator="$5"
+  local profile="$6"
   local tmp_path="$path.tmp.$$"
   mkdir -p "$(dirname "$path")"
   jq -n \
     --arg container_id "$container_id" \
     --arg container "$container" \
+    --arg profile "$profile" \
     --argjson reuse_emulator "$reuse_emulator" \
     --arg mode "$mode" \
     --arg implementation "$AI_SANDBOX_MCP_IMPLEMENTATION" \
     --arg version "$AI_SANDBOX_MCP_VERSION" \
-    '{container_id: $container_id, container: $container, reuse_emulator: ($reuse_emulator == 1), mode: $mode, implementation: $implementation, version: $version, transport: "stdio"}' >"$tmp_path"
+    '{container_id: $container_id, container: $container, profile: $profile, reuse_emulator: ($reuse_emulator == 1), mode: $mode, implementation: $implementation, version: $version, transport: "stdio"}' >"$tmp_path"
   mv "$tmp_path" "$path"
 }

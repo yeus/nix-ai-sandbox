@@ -32,7 +32,7 @@ Usage:
     Start or stop browser-based code-server on a stable loopback port.
 
   ai-sandbox mcp [WORKSPACE] --tunnel [TUNNEL_ID] [--detach]
-  ai-sandbox mcp [WORKSPACE] --tunnel --reuse-emulator [--detach]
+  ai-sandbox mcp [WORKSPACE] --tunnel [--android|--emulator] [--android-gpu]
   ai-sandbox mcp [WORKSPACE] --status [--json]
   ai-sandbox mcp [WORKSPACE] --stop [--json]
   ai-sandbox mcp [WORKSPACE] --sessions
@@ -970,7 +970,7 @@ mcp_detach=0
 mcp_sessions=0
 mcp_attach_id=""
 mcp_reuse_emulator=0
-mcp_reuse_selected=0
+mcp_android_selected=0
 network_selected=0
 android_mode=0
 emulator_mode=0
@@ -1073,40 +1073,43 @@ while [[ $# -gt 0 ]]; do
       ;;
     --android)
       case "$cmd" in
-        start|shell|warm|exec|android-doctor)
+        start|shell|warm|exec|android-doctor|mcp)
           android_mode=1
+          [[ "$cmd" != mcp ]] || mcp_android_selected=1
           shift
           continue
           ;;
         *)
-          echo "--android is only valid with start/shell/warm/exec/android-doctor" >&2
+          echo "--android is only valid with start/shell/warm/exec/android-doctor/mcp" >&2
           exit 1
           ;;
       esac
       ;;
     --emulator|--android-emulator)
       case "$cmd" in
-        start|shell|warm|exec|android-doctor)
+        start|shell|warm|exec|android-doctor|mcp)
           android_mode=1
           emulator_mode=1
+          [[ "$cmd" != mcp ]] || mcp_android_selected=1
           shift
           continue
           ;;
         *)
-          echo "--emulator/--android-emulator is only valid with start/shell/warm/exec/android-doctor" >&2
+          echo "--emulator/--android-emulator is only valid with start/shell/warm/exec/android-doctor/mcp" >&2
           exit 1
           ;;
       esac
       ;;
     --android-gpu)
       case "$cmd" in
-        start|shell|warm|exec|android-doctor)
+        start|shell|warm|exec|android-doctor|mcp)
           android_gpu=1
+          [[ "$cmd" != mcp ]] || mcp_android_selected=1
           shift
           continue
           ;;
         *)
-          echo "--android-gpu is only valid with start/shell/warm/exec/android-doctor" >&2
+          echo "--android-gpu is only valid with start/shell/warm/exec/android-doctor/mcp" >&2
           exit 1
           ;;
       esac
@@ -1172,12 +1175,6 @@ while [[ $# -gt 0 ]]; do
     --detach)
       [[ "$cmd" == "mcp" ]] || { echo "--detach is only valid with mcp" >&2; exit 1; }
       mcp_detach=1
-      shift
-      ;;
-    --reuse-emulator)
-      [[ "$cmd" == "mcp" ]] || { echo "--reuse-emulator is only valid with mcp" >&2; exit 1; }
-      mcp_reuse_emulator=1
-      mcp_reuse_selected=1
       shift
       ;;
     --sessions)
@@ -1356,9 +1353,9 @@ if [[ "$cmd" == "mcp" && -n "$instance_arg" ]]; then
   exit 1
 fi
 
-if [[ "$mcp_reuse_selected" -eq 1 ]] &&
+if [[ "$mcp_android_selected" -eq 1 ]] &&
   { [[ "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 || "$mcp_sessions" -eq 1 || -n "$mcp_attach_id" ]]; }; then
-  echo "--reuse-emulator is only valid when starting MCP." >&2
+  echo "MCP Android flags are only valid when starting MCP." >&2
   exit 1
 fi
 
@@ -1368,13 +1365,13 @@ if [[ "$cmd" == "serve" && "$NETWORK_MODE" != "host" ]]; then
 fi
 
 if [[ "$cmd" == "mcp" ]]; then
-  if [[ "$mcp_reuse_emulator" -eq 0 && "$network_selected" -eq 1 && "$NETWORK_MODE" != bridge ]]; then
-    echo "ai-sandbox mcp uses bridge networking; host networking is unavailable." >&2
+  mcp_expected_network=bridge
+  [[ "$android_mode" -eq 0 ]] || mcp_expected_network=host
+  if [[ "$network_selected" -eq 1 && "$NETWORK_MODE" != "$mcp_expected_network" ]]; then
+    echo "MCP network must be $mcp_expected_network for the selected Android mode." >&2
     exit 1
   fi
-  if [[ "$mcp_reuse_emulator" -eq 0 ]]; then
-    NETWORK_MODE=bridge
-  fi
+  NETWORK_MODE="$mcp_expected_network"
   if [[ -n "$mcp_port" || "$mcp_local_selected" -eq 1 ]]; then
     echo "MCP uses stdio through Secure Tunnel; --port and --local are unavailable." >&2
     exit 1
@@ -1771,19 +1768,24 @@ if [[ "$cmd" == "mcp" ]]; then
   mcp_metadata="$(mcp_runtime_host_dir "$workspace_hash")/runtime/metadata.json"
   mcp_recorded_container="$(mcp_read_metadata_field "$mcp_metadata" container)"
   mcp_recorded_reuse="$(mcp_read_metadata_field "$mcp_metadata" reuse_emulator)"
-  if [[ "$mcp_reuse_selected" -eq 1 ]]; then
-    container_name="$(mcp_find_running_emulator_container "$workspace")"
+  mcp_recorded_profile="$(mcp_read_metadata_field "$mcp_metadata" profile)"
+  if [[ "$mcp_android_selected" -eq 1 ]]; then
     if [[ -f "$mcp_metadata" && "$mcp_recorded_container" != "$container_name" ]]; then
-      echo "MCP is recorded for another container; stop it before changing to emulator reuse." >&2
+      echo "MCP is recorded for another container; stop it before changing Android mode." >&2
       exit 1
     fi
   elif [[ "$mcp_recorded_reuse" == true ]]; then
+    # Keep status and stop safe for MCP sessions started with the old reuse mode.
     mcp_reuse_emulator=1
     container_name="$mcp_recorded_container"
-  fi
-  if [[ "$mcp_reuse_emulator" -eq 1 && "$network_selected" -eq 1 ]]; then
-    echo "--network cannot change a reused emulator container's networking." >&2
-    exit 1
+  elif [[ "$mcp_recorded_profile" == android || "$mcp_recorded_profile" == emulator ||
+    "$mcp_recorded_profile" == emulator-gpu ]]; then
+    android_mode=1
+    [[ "$mcp_recorded_profile" == android ]] || emulator_mode=1
+    [[ "$mcp_recorded_profile" != emulator-gpu ]] || android_gpu=1
+    runtime_profile="$mcp_recorded_profile"
+    NETWORK_MODE=host
+    container_name="$mcp_recorded_container"
   fi
 fi
 
@@ -2121,8 +2123,8 @@ run_mcp() {
     echo "The reused emulator container must use host networking for adb." >&2
     return 1
   fi
-  if [[ "$mcp_reuse_emulator" -eq 0 && "$actual_network" == host ]]; then
-    echo "MCP container uses host networking; recreate it with bridge networking." >&2
+  if [[ "$mcp_reuse_emulator" -eq 0 && "$actual_network" != "$NETWORK_MODE" ]]; then
+    echo "MCP container networking does not match $NETWORK_MODE; recreate it." >&2
     return 1
   fi
   tunnel_json="$(mcp_tunnel_status_json \
@@ -2158,7 +2160,7 @@ run_mcp() {
   mcp_write_metadata \
     "$runtime_dir/runtime/metadata.json" \
     "$(mcp_container_id "$container_name")" "$mcp_mode" \
-    "$container_name" "$mcp_reuse_emulator"
+    "$container_name" "$mcp_reuse_emulator" "$runtime_profile"
   if ! mcp_store_tunnel_credentials \
     "$mcp_tunnel_id" "$mcp_runtime_api_key"; then
     trap - INT TERM HUP

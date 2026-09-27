@@ -673,7 +673,7 @@ discover_flake_from_envrc() {
 }
 
 flake_target=""
-if [[ "$mode" == "start" || "$mode" == "shell" || "$mode" == "warm" || "$mode" == "exec" || "$mode" == "android-doctor" ]]; then
+if [[ "$mode" == "start" || "$mode" == "shell" || "$mode" == "warm" || "$mode" == "exec" || "$mode" == "mcp-exec" || "$mode" == "android-doctor" ]]; then
   flake_target="$(resolve_flake_target)"
   cd "$workspace"
 fi
@@ -718,7 +718,14 @@ run_nix_develop_with_auto_repair() {
   last_nix_develop_missing_default_devshell=0
   last_nix_develop_store_corruption=0
 
-  if [[ "$stream_mode" == "preserve_stdout_tty" ]]; then
+  if [[ "$stream_mode" == "mcp_stdio" ]]; then
+    # Keep Nix and shellHook output off the MCP stdout stream. The command
+    # receives the original stdout through file descriptor 3.
+    nix develop "$flake_target" --command \
+      /bin/bash -c 'exec "$@" 1>&3 3>&-' _ "$@" \
+      3>&1 2> >(tee "$log_file" >&2) 1>&2
+    status=$?
+  elif [[ "$stream_mode" == "preserve_stdout_tty" ]]; then
     nix develop "$flake_target" --command "$@" 2> >(tee "$log_file" >&2)
     status=$?
   else
@@ -745,7 +752,12 @@ run_nix_develop_with_auto_repair() {
     echo "AI_SANDBOX: detected likely /nix store corruption; running automatic repair and retrying..." >&2
     if nix-store --verify --check-contents --repair; then
       echo "AI_SANDBOX: repair finished; retrying nix develop..." >&2
-      if [[ "$stream_mode" == "preserve_stdout_tty" ]]; then
+      if [[ "$stream_mode" == "mcp_stdio" ]]; then
+        nix develop "$flake_target" --command \
+          /bin/bash -c 'exec "$@" 1>&3 3>&-' _ "$@" \
+          3>&1 2> >(tee "$log_file" >&2) 1>&2
+        status=$?
+      elif [[ "$stream_mode" == "preserve_stdout_tty" ]]; then
         nix develop "$flake_target" --command "$@" 2> >(tee "$log_file" >&2)
         status=$?
       else
@@ -853,8 +865,10 @@ run_android_doctor() {
   /bin/bash -lc "$android_doctor_cmd"
 }
 
-echo "AI_SANDBOX_VSCODE_DIRS: user-data=$vscode_user_data_dir extensions=$vscode_extensions_dir shared-user=$vscode_shared_user_dir"
-echo "AI_SANDBOX_CODE_SERVER_DIRS: user-data=$code_server_user_data_dir extensions=$code_server_extensions_dir"
+if [[ "$mode" != "mcp-exec" ]]; then
+  echo "AI_SANDBOX_VSCODE_DIRS: user-data=$vscode_user_data_dir extensions=$vscode_extensions_dir shared-user=$vscode_shared_user_dir"
+  echo "AI_SANDBOX_CODE_SERVER_DIRS: user-data=$code_server_user_data_dir extensions=$code_server_extensions_dir"
+fi
 
 launch_code_cmd='
   export BROWSER=/usr/local/bin/ai-sandbox-xdg-open
@@ -892,6 +906,22 @@ launch_code_server_cmd='
 '
 
 case "$mode" in
+  mcp-exec)
+    [[ "$#" -gt 0 ]] || { echo "AI_SANDBOX: mcp-exec requires a command." >&2; exit 2; }
+    if [[ -n "$flake_target" && "$AI_SANDBOX_NIX_AVAILABLE" == "1" ]]; then
+      if run_nix_develop_with_auto_repair mcp_stdio "$@"; then
+        exit 0
+      else
+        mcp_exit_status=$?
+      fi
+      if [[ "$last_nix_develop_missing_default_devshell" != "1" ]]; then
+        echo "AI_SANDBOX: MCP command or nix develop failed." >&2
+        exit "$mcp_exit_status"
+      fi
+      echo "AI_SANDBOX: no default dev shell; starting MCP without nix develop." >&2
+    fi
+    exec "$@"
+    ;;
   idle)
     exec sleep infinity
     ;;
