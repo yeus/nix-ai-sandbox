@@ -32,6 +32,7 @@ Usage:
     Start or stop browser-based code-server on a stable loopback port.
 
   ai-sandbox mcp [WORKSPACE] --tunnel [TUNNEL_ID] [--detach]
+  ai-sandbox mcp [WORKSPACE] --tunnel --reuse-emulator [--detach]
   ai-sandbox mcp [WORKSPACE] --status [--json]
   ai-sandbox mcp [WORKSPACE] --stop [--json]
   ai-sandbox mcp [WORKSPACE] --sessions
@@ -968,6 +969,8 @@ mcp_runtime_api_key=""
 mcp_detach=0
 mcp_sessions=0
 mcp_attach_id=""
+mcp_reuse_emulator=0
+mcp_reuse_selected=0
 network_selected=0
 android_mode=0
 emulator_mode=0
@@ -1171,6 +1174,12 @@ while [[ $# -gt 0 ]]; do
       mcp_detach=1
       shift
       ;;
+    --reuse-emulator)
+      [[ "$cmd" == "mcp" ]] || { echo "--reuse-emulator is only valid with mcp" >&2; exit 1; }
+      mcp_reuse_emulator=1
+      mcp_reuse_selected=1
+      shift
+      ;;
     --sessions)
       [[ "$cmd" == "mcp" ]] || { echo "--sessions is only valid with mcp" >&2; exit 1; }
       mcp_sessions=1
@@ -1347,17 +1356,25 @@ if [[ "$cmd" == "mcp" && -n "$instance_arg" ]]; then
   exit 1
 fi
 
+if [[ "$mcp_reuse_selected" -eq 1 ]] &&
+  { [[ "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 || "$mcp_sessions" -eq 1 || -n "$mcp_attach_id" ]]; }; then
+  echo "--reuse-emulator is only valid when starting MCP." >&2
+  exit 1
+fi
+
 if [[ "$cmd" == "serve" && "$NETWORK_MODE" != "host" ]]; then
   echo "ai-sandbox serve requires host networking for loopback-only SSH forwarding." >&2
   exit 1
 fi
 
 if [[ "$cmd" == "mcp" ]]; then
-  if [[ "$network_selected" -eq 1 && "$NETWORK_MODE" != bridge ]]; then
+  if [[ "$mcp_reuse_emulator" -eq 0 && "$network_selected" -eq 1 && "$NETWORK_MODE" != bridge ]]; then
     echo "ai-sandbox mcp uses bridge networking; host networking is unavailable." >&2
     exit 1
   fi
-  NETWORK_MODE=bridge
+  if [[ "$mcp_reuse_emulator" -eq 0 ]]; then
+    NETWORK_MODE=bridge
+  fi
   if [[ -n "$mcp_port" || "$mcp_local_selected" -eq 1 ]]; then
     echo "MCP uses stdio through Secure Tunnel; --port and --local are unavailable." >&2
     exit 1
@@ -1750,6 +1767,26 @@ else
   container_name="$base_container_name-$instance_arg"
 fi
 
+if [[ "$cmd" == "mcp" ]]; then
+  mcp_metadata="$(mcp_runtime_host_dir "$workspace_hash")/runtime/metadata.json"
+  mcp_recorded_container="$(mcp_read_metadata_field "$mcp_metadata" container)"
+  mcp_recorded_reuse="$(mcp_read_metadata_field "$mcp_metadata" reuse_emulator)"
+  if [[ "$mcp_reuse_selected" -eq 1 ]]; then
+    container_name="$(mcp_find_running_emulator_container "$workspace")"
+    if [[ -f "$mcp_metadata" && "$mcp_recorded_container" != "$container_name" ]]; then
+      echo "MCP is recorded for another container; stop it before changing to emulator reuse." >&2
+      exit 1
+    fi
+  elif [[ "$mcp_recorded_reuse" == true ]]; then
+    mcp_reuse_emulator=1
+    container_name="$mcp_recorded_container"
+  fi
+  if [[ "$mcp_reuse_emulator" -eq 1 && "$network_selected" -eq 1 ]]; then
+    echo "--network cannot change a reused emulator container's networking." >&2
+    exit 1
+  fi
+fi
+
 if [[ "$cmd" == "serve" && "$server_stop" -eq 1 ]]; then
   if podman inspect "$container_name" >/dev/null 2>&1; then
     podman stop "$container_name" >/dev/null
@@ -1853,7 +1890,7 @@ if [[ "$cmd" == "mcp" ]]; then
   mkdir -p "$mcp_runtime_host/runtime"
   chmod 0700 "$mcp_runtime_host"
   home_mount_spec="$mcp_runtime_host:/sandbox-home${selinux_label_opt}"
-  if [[ -f "$HOME_STORAGE/.codex/AGENTS.md" ]]; then
+  if [[ "$mcp_reuse_emulator" -eq 0 && -f "$HOME_STORAGE/.codex/AGENTS.md" ]]; then
     mkdir -p "$mcp_runtime_host/.codex"
     if [[ ! -f "$mcp_runtime_host/.codex/AGENTS.md" ]]; then
       cp "$HOME_STORAGE/.codex/AGENTS.md" "$mcp_runtime_host/.codex/AGENTS.md"
@@ -2042,7 +2079,7 @@ run_exec() {
 }
 
 run_mcp() {
-  local existing_state actual_network runtime_dir lock_file tunnel_json existing_mode existing_version legacy_container new_tunnel=0
+  local existing_state actual_network runtime_dir lock_file tunnel_json existing_mode existing_version legacy_container recorded_id new_tunnel=0
   runtime_dir="$(mcp_runtime_host_dir "$workspace_hash")"
   lock_file="$runtime_dir/runtime/lock"
   mkdir -p "$(dirname "$lock_file")"
@@ -2055,7 +2092,18 @@ run_mcp() {
 
   legacy_container="ai-sandbox-${project_slug}-workspace-${workspace_hash}-default"
   existing_state="$(podman inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
-  if [[ "$existing_state" == "running" ]]; then
+  if [[ "$mcp_reuse_emulator" -eq 1 ]]; then
+    if [[ "$existing_state" != "running" ]]; then
+      echo "The emulator-enabled container is no longer running: $container_name" >&2
+      return 1
+    fi
+    recorded_id="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" container_id)"
+    if [[ -n "$recorded_id" && "$recorded_id" != "$(mcp_container_id "$container_name")" ]]; then
+      echo "The reused container changed; stop MCP before reconnecting." >&2
+      return 1
+    fi
+    echo "Reusing emulator-enabled sandbox container $container_name..." >&2
+  elif [[ "$existing_state" == "running" ]]; then
     echo "Reusing sandbox workspace container $container_name..." >&2
   elif [[ -n "$existing_state" ]]; then
     echo "Starting sandbox workspace container $container_name..." >&2
@@ -2069,13 +2117,17 @@ run_mcp() {
   fi
 
   actual_network="$(podman inspect -f '{{.HostConfig.NetworkMode}}' "$container_name")"
-  if [[ "$actual_network" == host ]]; then
+  if [[ "$mcp_reuse_emulator" -eq 1 && "$actual_network" != host ]]; then
+    echo "The reused emulator container must use host networking for adb." >&2
+    return 1
+  fi
+  if [[ "$mcp_reuse_emulator" -eq 0 && "$actual_network" == host ]]; then
     echo "MCP container uses host networking; recreate it with bridge networking." >&2
     return 1
   fi
   tunnel_json="$(mcp_tunnel_status_json \
     "$container_name" "$runtime_dir" \
-    "$(mcp_runtime_container_dir "$workspace_hash")")"
+    "$(mcp_runtime_container_dir "$workspace_hash" "$mcp_reuse_emulator")")"
   existing_mode="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" mode)"
   existing_version="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" version)"
   if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" == true &&
@@ -2105,7 +2157,8 @@ run_mcp() {
   fi
   mcp_write_metadata \
     "$runtime_dir/runtime/metadata.json" \
-    "$(mcp_container_id "$container_name")" "$mcp_mode"
+    "$(mcp_container_id "$container_name")" "$mcp_mode" \
+    "$container_name" "$mcp_reuse_emulator"
   if ! mcp_store_tunnel_credentials \
     "$mcp_tunnel_id" "$mcp_runtime_api_key"; then
     trap - INT TERM HUP

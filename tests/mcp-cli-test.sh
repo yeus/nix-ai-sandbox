@@ -43,21 +43,56 @@ printf ' <%s>' "$@" >>"$AI_SANDBOX_TEST_ROOT/commands.log"
 printf '\n' >>"$AI_SANDBOX_TEST_ROOT/commands.log"
 
 state="$AI_SANDBOX_TEST_ROOT/container-running"
+emulator_state="$AI_SANDBOX_TEST_ROOT/emulator-running"
 runtime="$(find "$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp-winx" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1 || true)"
 case "${1:-}" in
   image) exit 0 ;;
+  ps)
+    if [[ -f "$emulator_state" && "$*" == *'label=ai-sandbox.profile=emulator '* ]]; then
+      echo synthetic-emulator-container
+    fi
+    if [[ -f "$AI_SANDBOX_TEST_ROOT/emulator-gpu-running" &&
+      "$*" == *'label=ai-sandbox.profile=emulator-gpu '* ]]; then
+      echo synthetic-gpu-container
+    fi
+    exit 0
+    ;;
   run) touch "$state"; echo synthetic-container-id; exit 0 ;;
   start) touch "$state"; exit 0 ;;
-  stop) rm -f "$state"; exit 0 ;;
+  stop)
+    if [[ "$2" == synthetic-emulator-container ]]; then
+      rm -f "$emulator_state"
+    else
+      rm -f "$state"
+    fi
+    exit 0
+    ;;
   inspect)
-    [[ "$*" == *-mcp-* ]] || exit 1
-    [[ -f "$state" ]] || exit 1
+    if [[ "$*" == *synthetic-emulator-container* ]]; then
+      [[ -f "$emulator_state" ]] || exit 1
+    else
+      [[ "$*" == *-mcp-* && -f "$state" ]] || exit 1
+    fi
     case "$*" in
       *State.Status*) echo running ;;
       *State.Running*) echo true ;;
-      *HostConfig.NetworkMode*) echo bridge ;;
-      *Config.Env*) echo AI_SANDBOX_NETWORK_MODE=bridge ;;
-      *Id*) echo synthetic-container-id ;;
+      *HostConfig.NetworkMode*)
+        if [[ "$*" == *synthetic-emulator-container* ]]; then echo host; else echo bridge; fi
+        ;;
+      *Config.Env*)
+        if [[ "$*" == *synthetic-emulator-container* ]]; then
+          echo AI_SANDBOX_NETWORK_MODE=host
+        else
+          echo AI_SANDBOX_NETWORK_MODE=bridge
+        fi
+        ;;
+      *Id*)
+        if [[ "$*" == *synthetic-emulator-container* ]]; then
+          echo synthetic-emulator-id
+        else
+          echo synthetic-container-id
+        fi
+        ;;
     esac
     exit 0
     ;;
@@ -285,3 +320,54 @@ wait "$activity_pid" || true
 activity_pid=""
 rg -q 'BashCommand command ok' "$test_root/activity.out"
 ! rg -q private-test-argument "$test_root/activity.out"
+
+# Reuse an existing emulator container without creating or stopping one.
+if "$ai_sandbox" mcp "$workspace" --tunnel --reuse-emulator --detach \
+  >"$test_root/reuse-missing.out" 2>"$test_root/reuse-missing.err"; then
+  echo "MCP reused a missing emulator container" >&2
+  exit 1
+fi
+rg -q 'running emulator' "$test_root/reuse-missing.err"
+touch "$test_root/emulator-running"
+touch "$test_root/emulator-gpu-running"
+if "$ai_sandbox" mcp "$workspace" --tunnel --reuse-emulator --detach \
+  >"$test_root/reuse-ambiguous.out" 2>"$test_root/reuse-ambiguous.err"; then
+  echo "MCP chose an ambiguous emulator container" >&2
+  exit 1
+fi
+rg -q 'Multiple emulator-enabled containers' "$test_root/reuse-ambiguous.err"
+rm "$test_root/emulator-gpu-running"
+: >"$test_root/commands.log"
+if ! "$ai_sandbox" mcp "$workspace" --tunnel --reuse-emulator --detach \
+  >"$test_root/reuse-start.out" 2>"$test_root/reuse-start.err"; then
+  cat "$test_root/reuse-start.err" >&2
+  exit 1
+fi
+rg -F '<exec> <synthetic-emulator-container>' \
+  "$test_root/commands.log" >/dev/null
+rg -F "<AI_SANDBOX_MCP_RUNTIME_DIR=/sandbox-home/.ai-sandbox/mcp-winx/" \
+  "$test_root/commands.log" >/dev/null
+if rg -q '^podman <run>|^podman <start>' "$test_root/commands.log"; then
+  echo "MCP created another container in reuse mode" >&2
+  exit 1
+fi
+jq -e '.container == "synthetic-emulator-container" and .reuse_emulator == true' \
+  "$runtime/runtime/metadata.json" >/dev/null
+"$ai_sandbox" mcp "$workspace" --status --json >"$test_root/reuse-status.json"
+jq -e '.container == "synthetic-emulator-container" and .reuse_emulator == true and .health == "ok"' \
+  "$test_root/reuse-status.json" >/dev/null
+: >"$test_root/commands.log"
+"$ai_sandbox" mcp "$workspace" --tunnel --detach \
+  >"$test_root/reuse-repeat.out" 2>"$test_root/reuse-repeat.err"
+rg -q 'already running' "$test_root/reuse-repeat.err"
+if rg -q '^podman <run>|^podman <start>' "$test_root/commands.log"; then
+  echo "Repeated MCP start created another container" >&2
+  exit 1
+fi
+: >"$test_root/commands.log"
+"$ai_sandbox" mcp "$workspace" --stop >"$test_root/reuse-stop.out"
+[[ -f "$test_root/emulator-running" ]]
+if rg -F '<stop> <synthetic-emulator-container>' "$test_root/commands.log"; then
+  echo "Stopping MCP stopped the reused emulator container" >&2
+  exit 1
+fi

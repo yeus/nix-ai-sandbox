@@ -112,7 +112,35 @@ mcp_runtime_host_dir() {
 }
 
 mcp_runtime_container_dir() {
-  printf '/sandbox-home\n'
+  local hash="$1"
+  local reuse_emulator="$2"
+  if [[ "$reuse_emulator" -eq 1 ]]; then
+    printf '/sandbox-home/.ai-sandbox/mcp-winx/%s\n' "$hash"
+  else
+    printf '/sandbox-home\n'
+  fi
+}
+
+mcp_find_running_emulator_container() {
+  local workspace_path="$1"
+  local -a candidates=()
+  mapfile -t candidates < <(
+    podman ps --filter label=ai-sandbox=true \
+      --filter "label=ai-sandbox.workspace=$workspace_path" \
+      --filter label=ai-sandbox.profile=emulator --format '{{.Names}}'
+    podman ps --filter label=ai-sandbox=true \
+      --filter "label=ai-sandbox.workspace=$workspace_path" \
+      --filter label=ai-sandbox.profile=emulator-gpu --format '{{.Names}}'
+  )
+  if [[ "${#candidates[@]}" -eq 0 ]]; then
+    echo "No running emulator-enabled ai-sandbox container for $workspace_path." >&2
+    return 1
+  fi
+  if [[ "${#candidates[@]}" -ne 1 ]]; then
+    echo "Multiple emulator-enabled containers are running for this workspace; stop all but one." >&2
+    return 1
+  fi
+  printf '%s\n' "${candidates[0]}"
 }
 
 mcp_container_id() {
@@ -157,7 +185,7 @@ mcp_start_tunnel() {
   local legacy_container="$5"
   local runtime_dir runtime_container_dir tunnel_json existing_tunnel_id
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
-  runtime_container_dir="$(mcp_runtime_container_dir "$hash")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
   tunnel_json="$(mcp_tunnel_status_json \
     "$container" "$runtime_dir" "$runtime_container_dir")"
 
@@ -186,7 +214,8 @@ mcp_start_tunnel() {
   fi
   echo "Connecting Secure MCP Tunnel..." >&2
   CONTROL_PLANE_API_KEY="$runtime_api_key" \
-    podman exec -e CONTROL_PLANE_API_KEY "$container" \
+    podman exec -e CONTROL_PLANE_API_KEY \
+      -e "AI_SANDBOX_MCP_RUNTIME_DIR=$runtime_container_dir" "$container" \
     /usr/local/bin/ai-sandbox-mcp-tunnel-start \
     "$runtime_container_dir" \
     "$AI_SANDBOX_MCP_TUNNEL_VERSION" \
@@ -200,7 +229,7 @@ mcp_stop_tunnel() {
   local quiet="${3:-0}"
   local runtime_dir runtime_container_dir tunnel_json tunnel_version attempt
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
-  runtime_container_dir="$(mcp_runtime_container_dir "$hash")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
   tunnel_json="$(mcp_tunnel_status_json \
     "$container" "$runtime_dir" "$runtime_container_dir")"
 
@@ -236,7 +265,7 @@ mcp_emit_status() {
   local json_output="$4"
   local runtime_dir runtime_container_dir metadata mode health tunnel_json tunnel_ui
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
-  runtime_container_dir="$(mcp_runtime_container_dir "$hash")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
   metadata="$runtime_dir/runtime/metadata.json"
   mode="$(mcp_read_metadata_field "$metadata" mode)"
   tunnel_json="$(mcp_tunnel_status_json \
@@ -253,12 +282,13 @@ mcp_emit_status() {
       --arg workspace "$workspace_path" \
       --arg container "$container" \
       --arg mode "$mode" \
+      --argjson reuse_emulator "${mcp_reuse_emulator:-0}" \
       --arg implementation "$AI_SANDBOX_MCP_IMPLEMENTATION" \
       --arg version "$AI_SANDBOX_MCP_VERSION" \
       --arg transport "stdio" \
       --arg health "$health" \
       --argjson tunnel "$tunnel_json" \
-      '{workspace: $workspace, container: $container, mode: ($mode | if length > 0 then . else null end), implementation: $implementation, version: $version, transport: $transport, endpoint: null, health: $health, tunnel: $tunnel}'
+      '{workspace: $workspace, container: $container, reuse_emulator: ($reuse_emulator == 1), mode: ($mode | if length > 0 then . else null end), implementation: $implementation, version: $version, transport: $transport, endpoint: null, health: $health, tunnel: $tunnel}'
     return
   fi
 
@@ -266,6 +296,7 @@ mcp_emit_status() {
   echo
   echo "Workspace: $workspace_path"
   echo "Container: $container"
+  [[ "${mcp_reuse_emulator:-0}" -eq 0 ]] || echo "Reusing emulator container: yes"
   echo "Mode: ${mode:-unknown}"
   echo "Implementation: $AI_SANDBOX_MCP_IMPLEMENTATION @ $AI_SANDBOX_MCP_VERSION"
   echo "Transport: stdio through Secure MCP Tunnel"
@@ -302,7 +333,7 @@ mcp_stop_process() {
 
   mcp_stop_tunnel "$container" "$hash" "$quiet" || tunnel_stop_failed=1
   [[ "$tunnel_stop_failed" -eq 0 ]] || return 1
-  if container_is_running "$container"; then
+  if [[ "${mcp_reuse_emulator:-0}" -eq 0 ]] && container_is_running "$container"; then
     podman stop "$container" >/dev/null
     [[ "$quiet" -eq 1 ]] || echo "Stopped MCP container $container."
   fi
@@ -346,7 +377,7 @@ mcp_supervise_tunnel() {
   local activity_pid="" stop_signal="" result=0 key=""
   local consumer="ais-foreground-$BASHPID"
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
-  runtime_container_dir="$(mcp_runtime_container_dir "$hash")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
 
   touch "$runtime_dir/runtime/usage.jsonl"
   chmod 0600 "$runtime_dir/runtime/usage.jsonl"
@@ -422,13 +453,17 @@ mcp_write_metadata() {
   local path="$1"
   local container_id="$2"
   local mode="$3"
+  local container="$4"
+  local reuse_emulator="$5"
   local tmp_path="$path.tmp.$$"
   mkdir -p "$(dirname "$path")"
   jq -n \
     --arg container_id "$container_id" \
+    --arg container "$container" \
+    --argjson reuse_emulator "$reuse_emulator" \
     --arg mode "$mode" \
     --arg implementation "$AI_SANDBOX_MCP_IMPLEMENTATION" \
     --arg version "$AI_SANDBOX_MCP_VERSION" \
-    '{container_id: $container_id, mode: $mode, implementation: $implementation, version: $version, transport: "stdio"}' >"$tmp_path"
+    '{container_id: $container_id, container: $container, reuse_emulator: ($reuse_emulator == 1), mode: $mode, implementation: $implementation, version: $version, transport: "stdio"}' >"$tmp_path"
   mv "$tmp_path" "$path"
 }
