@@ -1,5 +1,7 @@
 FROM docker.io/library/ubuntu:24.04
 
+LABEL ai-sandbox=true
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NIX_INSTALLER_NO_CONFIRM=1
 
@@ -89,7 +91,8 @@ RUN ln -sf /nix/var/nix/profiles/default/bin/nix /usr/local/bin/nix && \
     [ ! -e /nix/var/nix/profiles/default/bin/nix-env ] || ln -sf /nix/var/nix/profiles/default/bin/nix-env /usr/local/bin/nix-env && \
     [ ! -e /nix/var/nix/profiles/default/bin/nix-store ] || ln -sf /nix/var/nix/profiles/default/bin/nix-store /usr/local/bin/nix-store && \
     [ ! -e /nix/var/nix/profiles/default/bin/nix-shell ] || ln -sf /nix/var/nix/profiles/default/bin/nix-shell /usr/local/bin/nix-shell && \
-    [ ! -e /nix/var/nix/profiles/default/bin/nix-instantiate ] || ln -sf /nix/var/nix/profiles/default/bin/nix-instantiate /usr/local/bin/nix-instantiate
+    [ ! -e /nix/var/nix/profiles/default/bin/nix-instantiate ] || ln -sf /nix/var/nix/profiles/default/bin/nix-instantiate /usr/local/bin/nix-instantiate && \
+    [ ! -e /nix/var/nix/profiles/default/bin/nix-collect-garbage ] || ln -sf /nix/var/nix/profiles/default/bin/nix-collect-garbage /usr/local/bin/nix-collect-garbage
 
 RUN mkdir -p /nix-seed \
     && rsync -a \
@@ -110,6 +113,12 @@ COPY ai-sandbox-code-server-update.sh /usr/local/bin/ai-sandbox-code-server-upda
 COPY ai-sandbox-user-code.sh /usr/local/bin/ai-sandbox-user-code
 COPY ai-sandbox-default-install.sh /usr/local/bin/ai-sandbox-default-install
 COPY ai-sandbox-agent-config.sh /usr/local/bin/ai-sandbox-agent-config
+COPY mcp/install.sh /usr/local/bin/ai-sandbox-mcp-install
+COPY mcp/launch.sh /usr/local/bin/ai-sandbox-mcp-launch
+COPY mcp/tunnel-install.sh /usr/local/bin/ai-sandbox-mcp-tunnel-install
+COPY mcp/tunnel-start.sh /usr/local/bin/ai-sandbox-mcp-tunnel-start
+COPY mcp/tunnel-status.sh /usr/local/bin/ai-sandbox-mcp-tunnel-status
+COPY mcp/tunnel-stop.sh /usr/local/bin/ai-sandbox-mcp-tunnel-stop
 COPY AGENTS.md /usr/local/share/ai-sandbox/default-AGENTS.md
 COPY skills /usr/local/share/ai-sandbox/default-skills
 
@@ -122,6 +131,12 @@ RUN chmod +x \
     /usr/local/bin/ai-sandbox-user-code \
     /usr/local/bin/ai-sandbox-default-install \
     /usr/local/bin/ai-sandbox-agent-config \
+    /usr/local/bin/ai-sandbox-mcp-install \
+    /usr/local/bin/ai-sandbox-mcp-launch \
+    /usr/local/bin/ai-sandbox-mcp-tunnel-install \
+    /usr/local/bin/ai-sandbox-mcp-tunnel-start \
+    /usr/local/bin/ai-sandbox-mcp-tunnel-status \
+    /usr/local/bin/ai-sandbox-mcp-tunnel-stop \
     && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/local/bin/xdg-open \
     && ln -sf /usr/local/bin/ai-sandbox-xdg-open /usr/bin/xdg-open \
     && ln -sf /usr/local/bin/ai-sandbox-user-code /usr/local/bin/code

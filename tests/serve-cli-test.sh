@@ -8,6 +8,7 @@ trap 'rm -rf "$test_root"' EXIT
 export AI_SANDBOX_STATE_DIR="$test_root/state"
 export AI_SANDBOX_HOME_STORAGE="$test_root/home"
 export AI_SANDBOX_NIX_STORAGE="$test_root/nix"
+export AI_SANDBOX_TMP_ROOT="$test_root/host-tmp"
 
 "$ai_sandbox" help >"$test_root/help.txt"
 grep -F 'ai-sandbox serve [WORKSPACE]' "$test_root/help.txt"

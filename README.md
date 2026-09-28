@@ -41,6 +41,7 @@ So instead of trusting every coding-agent plugin, you isolate the whole editor e
 - builds one global Ubuntu image with real Microsoft VS Code and Nix
 - uses bind-mounted host directories for `/nix` and sandbox home (defaults: `~/.cache/ai-sandbox/nix` and `~/.cache/ai-sandbox/home`)
 - mounts the current project at `/workspace`
+- mounts `/tmp/ais/<container-name>` from the host at `/tmp` inside each container
 - if the project is a Git submodule, mounts the top superproject at `/workspace` and opens the submodule path inside it (preserves nested submodule `.git` path resolution)
 - if a flake is available, launches via `nix develop`
 - if no flake is available, launches plain VS Code / plain shell
@@ -52,6 +53,31 @@ In practice, that means:
 - you can just run `ais` or `ai-sandbox` inside a flake-enabled repository
 - the sandbox reuses a shared `/nix` cache across projects
 - VS Code, extensions, and coding agents run inside the container instead of directly on your host
+
+Temporary files created inside a sandbox are visible on the host under
+`/tmp/ais/<container-name>/`. Each container has its own directory, so
+unrelated workspaces and instances do not share `/tmp`. The `/tmp/ais` parent
+is user-owned and private (`0700`); each mounted directory has normal `/tmp`
+permissions (`1777`). These files persist while the host keeps them and are
+not removed by `ai-sandbox` when a container stops. Treat them as potentially
+sensitive, and do not publish them without reviewing their contents.
+
+Existing containers keep their original mounts. Recreate a container before
+expecting its `/tmp` to appear on the host. `ai-sandbox reset-container .`
+removes all containers for the current workspace, but does not remove
+`/tmp/ais` files. This also discards any state stored only in those containers.
+
+## Everyday use
+
+Run `ais` on the host from the repository you want to work on. It starts VS
+Code in that repository's sandbox. For a disposable interactive shell, use
+`ais shell .`. Both commands use the current directory as the workspace; pass
+a different directory explicitly when needed.
+
+The ChatGPT connection is separate from the editor container. Run
+`ais mcp --tunnel` to start a dedicated MCP container for the same workspace.
+You do not need to start VS Code first. The MCP container can read and write
+the mounted repository and execute commands in its own sandbox shell.
 
 ## Why this differs from Dev Containers
 
@@ -132,6 +158,31 @@ Repair shared ai-sandbox Nix cache in place (verify/repair store paths, no delet
 ```bash
 ai-sandbox repair-nix
 ```
+
+Prune stopped sandbox containers, unused ai-sandbox image layers, and old
+unreferenced paths from the shared Nix store:
+
+```bash
+ai-sandbox prune
+```
+
+If a sandbox is still running, its container is kept while Nix and image cleanup
+continues. To explicitly stop and remove all ai-sandbox containers before
+garbage collection, use:
+
+```bash
+ai-sandbox prune --force
+```
+
+Running cleanup while containers remain active can keep some paths rooted; use
+`--force` when you want the most complete and isolated collection pass.
+
+The current tagged image and sandbox home are kept. Image pruning is limited to
+unused images labeled `ai-sandbox=true`, plus legacy dangling images whose
+recorded Podman name matches the configured sandbox image.
+
+Run pruning from the host shell where Podman is available. The sandbox itself
+does not expose the host Podman socket or the host storage paths.
 
 Sync shared global instructions (sandbox-wide, not project-local):
 
@@ -229,6 +280,134 @@ ai-sandbox serve . --stop
 Browser-editor profiles and extensions are separate from desktop VS Code
 profiles because code-server extension compatibility differs. Repository
 `.vscode` configuration remains shared through the workspace mount.
+
+## Workspace MCP
+
+### First-time connection to ChatGPT
+
+1. From the host, go to the repository you want ChatGPT to access. The current
+   directory becomes the workspace mounted at `/workspace` inside the MCP
+   container. You can also pass a workspace path, for example
+   `ais mcp /path/to/repo --tunnel`.
+2. [Create an OpenAI Secure MCP Tunnel](https://platform.openai.com/settings/organization/tunnels).
+   Creating one requires Tunnels Read + Manage. Associate it with the ChatGPT
+   workspace where you will create the app; association with only a Platform
+   organization is not enough for that workspace to list it.
+3. [Create a runtime API key](https://platform.openai.com/settings/organization/api-keys)
+   with Tunnels Read + Use. Start the sandbox MCP connection:
+
+   ```bash
+   ais mcp --tunnel
+   ```
+
+   On first use, `ais` asks for the tunnel ID and runtime key and saves them in
+   the desktop Secret Service through `secret-tool`. You do not need to export
+   a control-plane key or put either value in a project file. Wait until the
+   status says `Tunnel Health: READY`, then leave this terminal running while
+   you connect ChatGPT.
+
+4. In ChatGPT, enable **Developer mode** under **Settings → Security and login**
+   if your account or workspace permits it. Open **Plugins**, select **+** to
+   create an MCP app, choose **Tunnel** under Connection, and select or paste
+   the same tunnel ID. Choose **No auth** for this Winx MCP server: it does not
+   implement app-level OAuth. The runtime API key belongs only in the `ais`
+   prompt, never in the ChatGPT app form. Anyone allowed to use this app can
+   call its sandboxed Bash and file tools, so share it only with trusted users.
+5. In a new ChatGPT conversation, add the app from the tools menu and ask it to
+   use the sandbox to inspect or change this repository. Winx exposes a Bash
+   shell and file tools inside the dedicated MCP container.
+
+OpenAI's [Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+and [ChatGPT app connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt)
+describe the Platform and ChatGPT sides of these steps. The tunnel is for
+private developer-mode connections; it does not publish a public MCP URL or
+make this app eligible for public plugin submission.
+
+### While it is running
+
+The foreground command starts with Winx output hidden. Press `v` to show tool
+activity and shell output in the same terminal; press `v` again to hide it.
+Available shell scrollback is shown when you turn output back on. Tool activity
+shows names and outcomes without command text or file contents, while shell
+output may include commands and their results. Press `Ctrl-C` to stop the
+tunnel and its dedicated MCP container.
+
+For background operation instead, run:
+
+```bash
+ais mcp --tunnel --detach
+```
+
+Later `ais mcp --tunnel` invocations reuse the saved credentials. You can also
+pass a tunnel ID with `--tunnel TUNNEL_ID`; it is saved after the runtime key is
+available. To inspect health or stop a detached tunnel, run:
+
+```bash
+ais mcp --status
+ais mcp --status --json
+ais mcp --stop
+```
+
+To list Winx shell sessions or follow one specific thread from another
+terminal, run:
+
+```bash
+ais mcp --sessions
+ais mcp --attach THREAD_ID
+```
+
+If ChatGPT says **No tunnels yet**, check the tunnel's ChatGPT workspace
+association and the app creator's Tunnels Read + Use permission, then refresh
+the list. If the app cannot discover tools or make calls, leave
+`ais mcp --tunnel` running and check `ais mcp --status` or the printed local
+Tunnel UI URL for `READY` health. An active tunnel cannot be switched to
+another ID; stop it before starting with a different one.
+
+### Container boundary
+
+The pinned, checksum-verified tunnel client launches pinned Winx over stdio.
+Winx exposes a persistent Bash shell plus file reading and editing tools rooted
+at `/workspace`. The tunnel key is removed from Winx's environment before it
+starts. The MCP container has its own persistent home directory. It uses bridge
+networking by default, so it cannot see the normal sandbox home or host loopback
+services. The workspace and Nix storage remain mounted read/write so commands
+can work.
+
+Winx asks the calling AI to read the workspace's `AGENTS.md` and the Codex
+instructions at `/sandbox-home/.codex/AGENTS.md` after initialization. If the
+normal sandbox has a global Codex `AGENTS.md`, the dedicated MCP container
+mounts that one file read-only at the same path; otherwise its separate home
+uses the image's default copy.
+Nested workspace `AGENTS.md` files should be read when relevant. These are MCP
+guidance for the calling AI, not enforced rules.
+
+To control an emulator through the host adb server, give the dedicated MCP
+container Android access:
+
+```bash
+ais mcp --tunnel --android
+```
+
+This keeps MCP's separate home and uses host networking so
+`ADB_SERVER_SOCKET=tcp:127.0.0.1:5037` reaches the same adb server as the
+normal Android sandbox. It does not need KVM to control an emulator that is
+already running.
+
+To start an emulator inside the MCP container itself, use
+`ais mcp --tunnel --emulator`. This also mounts the Android state directory and
+passes `/dev/kvm`; `--android-gpu` optionally passes `/dev/dri`. The flag does
+not start an AVD automatically. Winx starts in the project's Nix dev shell
+when one is available, so its commands can use the same Android tools as
+`ais shell --emulator`. Stop MCP before changing Android modes.
+
+Installation, tunnel state, and privacy-safe usage logs stay under the
+dedicated MCP home in sandbox storage. No MCP configuration is added to the project.
+Submodule workspaces whose normal sandbox mount includes a parent repository
+are rejected; start MCP from the mounted top-level repository. The pinned Winx
+release currently supports Linux x86-64; other architectures fail clearly.
+
+On first use after the old `gpt-repo-mcp` integration, the launcher stops the
+old MCP container before connecting Winx.
 
 Open an interactive shell in the sandbox:
 
@@ -662,10 +841,20 @@ If you see `database disk image is malformed` for `/nix/var/nix/db/db.sqlite`:
 
 Recent ai-sandbox versions now seed `/nix` only once and avoid copying seeded Nix DB runtime files into a live cache, which reduces the chance of this corruption pattern.
 
-If you recently changed ai-sandbox scripts, rebuild and restart containers so the new entrypoint is used:
+If you changed the host launcher or its MCP scripts, reactivate the Home Manager
+profile that imports `ai-sandbox.nix`. For this repository's `#tom` profile:
+
+```bash
+home-manager switch --flake .#tom
+```
+
+If you changed the Dockerfile or files copied into the container image, rebuild
+the image. Existing containers keep their old image until you reset and
+recreate them:
 
 ```bash
 ai-sandbox rebuild
+ai-sandbox reset-container .
 ```
 
 To confirm home persistence across rebuild:

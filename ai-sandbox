@@ -8,7 +8,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_CONTEXT="${AI_SANDBOX_BUILD_CONTEXT:-$SCRIPT_DIR}"
 STATE_DIR="${AI_SANDBOX_STATE_DIR:-$HOME/.local/state/ai-sandbox}"
 ANDROID_STATE_DIR="${AI_SANDBOX_ANDROID_STATE_DIR:-$HOME/.cache/ai-sandbox/android}"
+TMP_ROOT="${AI_SANDBOX_TMP_ROOT:-/tmp/ais}"
 NETWORK_MODE="${AI_SANDBOX_NETWORK_MODE:-host}"
+MCP_LIB_DIR="${AI_SANDBOX_MCP_LIB_DIR:-$SCRIPT_DIR/mcp}"
+
+source "$MCP_LIB_DIR/host.sh"
 
 mkdir -p "$STATE_DIR"
 
@@ -26,6 +30,14 @@ Usage:
   ai-sandbox serve [WORKSPACE] [--flake PATH] [--instance NAME] [--port PORT] [--logs]
   ai-sandbox serve [WORKSPACE] [--instance NAME] --stop
     Start or stop browser-based code-server on a stable loopback port.
+
+  ai-sandbox mcp [WORKSPACE] --tunnel [TUNNEL_ID] [--detach]
+  ai-sandbox mcp [WORKSPACE] --tunnel [--android|--emulator] [--android-gpu]
+  ai-sandbox mcp [WORKSPACE] --status [--json]
+  ai-sandbox mcp [WORKSPACE] --stop [--json]
+  ai-sandbox mcp [WORKSPACE] --sessions
+  ai-sandbox mcp [WORKSPACE] --attach THREAD_ID
+    Start, inspect, or stop Winx MCP with sandboxed Bash access.
 
   ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--android|--emulator|--android-emulator] [--android-gpu] [-- COMMAND [ARGS...]]
     Start/attach the sandbox and open an interactive shell (or run command after --).
@@ -62,6 +74,10 @@ Usage:
 
   ai-sandbox repair-nix
     Attempt targeted repair steps for broken Nix state in the sandbox.
+
+  ai-sandbox prune [--force]
+    Remove stopped sandbox containers, old sandbox images, and unreferenced Nix store paths.
+    Running containers are kept unless --force is used; Nix/image cleanup still runs.
 
   ai-sandbox agents pull|push [--file PATH] [--force]
     Sync the shared global AGENTS.md with a project file.
@@ -266,6 +282,154 @@ ensure_image_exists() {
   fi
   echo "Image '$IMAGE' not found locally. Building from $BUILD_CONTEXT..." >&2
   podman build -t "$IMAGE" -f "$BUILD_CONTEXT/Dockerfile" "$BUILD_CONTEXT"
+}
+
+storage_mount_spec() {
+  local storage="$1"
+  local target="$2"
+  local selinux_label_opt="$3"
+
+  if [[ "$storage" == /* ]]; then
+    mkdir -p "$storage"
+    printf '%s:%s%s\n' "$storage" "$target" "$selinux_label_opt"
+  else
+    printf '%s:%s%s,U\n' "$storage" "$target" "$selinux_label_opt"
+  fi
+}
+
+prepare_tmp_mount() {
+  local root="$1" container="$2" container_tmp
+  if [[ "$root" != /* || "$root" == / || -L "$root" ]]; then
+    echo "Refusing unsafe host temp root: $root" >&2
+    return 1
+  fi
+  if [[ ! -e "$root" ]]; then
+    mkdir -m 0700 -- "$root"
+  fi
+  if [[ ! -d "$root" || "$(stat -c %u "$root")" != "$(id -u)" ||
+    "$(stat -c %a "$root")" != 700 ]]; then
+    echo "Refusing unsafe host temp root: $root (expected a user-owned 0700 directory)" >&2
+    return 1
+  fi
+
+  container_tmp="$root/$container"
+  if [[ -L "$container_tmp" ]]; then
+    echo "Refusing symlinked host temp directory: $container_tmp" >&2
+    return 1
+  fi
+  if [[ ! -e "$container_tmp" ]]; then
+    mkdir -m 1777 -- "$container_tmp"
+  fi
+  if [[ ! -d "$container_tmp" || "$(stat -c %u "$container_tmp")" != "$(id -u)" ||
+    "$(stat -c %a "$container_tmp")" != 1777 ]]; then
+    echo "Refusing unsafe host temp directory: $container_tmp (expected a user-owned 1777 directory)" >&2
+    return 1
+  fi
+  printf '%s\n' "$container_tmp"
+}
+
+require_safe_storage_path() {
+  local storage_name="$1"
+  local storage_path="$2"
+
+  case "$storage_path" in
+    ""|"/")
+      echo "Refusing to prune unsafe $storage_name path: $storage_path" >&2
+      return 1
+      ;;
+  esac
+}
+
+run_nix_gc() {
+  local home_mount_spec nix_mount_spec selinux_label_opt
+  selinux_label_opt="$(selinux_mount_label_opt)"
+  home_mount_spec="$(storage_mount_spec "$HOME_STORAGE" /sandbox-home "$selinux_label_opt")"
+  nix_mount_spec="$(storage_mount_spec "$NIX_STORAGE" /nix "$selinux_label_opt")"
+
+  echo "Collecting unreferenced paths from the shared ai-sandbox Nix store..."
+  podman run --rm \
+    --userns=keep-id \
+    --user "$(id -u):$(id -g)" \
+    --group-add keep-groups \
+    -e HOME=/sandbox-home \
+    -e XDG_RUNTIME_DIR=/tmp/xdg-runtime \
+    -e AI_SANDBOX_MODE=gc \
+    -v "$home_mount_spec" \
+    -v "$nix_mount_spec" \
+    "$IMAGE"
+}
+
+prune_legacy_images() {
+  local image_id image_name image_names
+  local -a legacy_image_ids=()
+
+  while IFS= read -r image_id; do
+    [[ -n "$image_id" ]] || continue
+    image_names="$(podman image inspect \
+      --format '{{range .NamesHistory}}{{println .}}{{end}}' \
+      "$image_id" 2>/dev/null || true)"
+    while IFS= read -r image_name; do
+      case "$image_name" in
+        "$IMAGE"|"$IMAGE":*)
+          legacy_image_ids+=("$image_id")
+          break
+          ;;
+      esac
+    done <<< "$image_names"
+  done < <(
+    podman images --all \
+      --filter dangling=true \
+      --no-trunc \
+      --format '{{.ID}}'
+  )
+
+  for image_id in "${legacy_image_ids[@]}"; do
+    echo "Removing legacy ai-sandbox image: $image_id"
+    podman image rm "$image_id" >/dev/null 2>&1 || true
+  done
+}
+
+run_prune() {
+  local containers_skipped=0
+  local -a running_containers sandbox_containers
+
+  require_safe_storage_path "HOME" "$HOME_STORAGE"
+  require_safe_storage_path "Nix" "$NIX_STORAGE"
+
+  mapfile -t running_containers < <(
+    podman ps --filter label=ai-sandbox=true --format '{{.Names}}'
+  )
+  if [[ ${#running_containers[@]} -gt 0 && "$prune_force" -ne 1 ]]; then
+    echo "Running ai-sandbox containers found: ${running_containers[*]}" >&2
+    echo "Leaving them running; continuing with Nix GC and image cleanup." >&2
+    containers_skipped=1
+  else
+    mapfile -t sandbox_containers < <(
+      podman ps -aq --filter label=ai-sandbox=true --format '{{.Names}}'
+    )
+    if [[ ${#sandbox_containers[@]} -gt 0 ]]; then
+      if [[ "$prune_force" -eq 1 ]]; then
+        podman rm -f "${sandbox_containers[@]}" >/dev/null
+      else
+        podman rm "${sandbox_containers[@]}" >/dev/null
+      fi
+      echo "Removed sandbox containers: ${sandbox_containers[*]}"
+    else
+      echo "No sandbox containers to remove."
+    fi
+  fi
+
+  ensure_image_exists
+  run_nix_gc
+
+  prune_legacy_images
+  echo "Removing unused images labeled ai-sandbox=true..."
+  podman image prune --force --filter label=ai-sandbox=true
+  if [[ "$containers_skipped" -eq 1 ]]; then
+    echo "AI sandbox prune complete; running containers were kept."
+  else
+    echo "AI sandbox prune complete."
+  fi
 }
 
 follow_startup_logs_until_vscode() {
@@ -806,15 +970,32 @@ auto_reconnect_interval="${AI_SANDBOX_AUTO_RECONNECT_INTERVAL:-8}"
 sync_mode=""
 sync_path_arg=""
 reset_all_containers=0
+prune_force=0
 server_port=""
 server_stop=0
+mcp_mode="write"
+mcp_mode_selected=0
+mcp_status=0
+mcp_stop=0
+mcp_json=0
+mcp_port=""
+mcp_local_selected=0
+mcp_tunnel_selected=0
+mcp_tunnel_id=""
+mcp_runtime_api_key=""
+mcp_detach=0
+mcp_sessions=0
+mcp_attach_id=""
+mcp_reuse_emulator=0
+mcp_android_selected=0
+network_selected=0
 android_mode=0
 emulator_mode=0
 android_gpu=0
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    start|serve|shell|warm|exec|install|build|logs|doctor-net|android-doctor|reconnect-network|build-base|rebuild|reset-container|reset-storage|reset-volumes|repair-nix|agents|skills|open-url|open-in-editor|help|-h|--help)
+    start|serve|mcp|shell|warm|exec|install|build|logs|doctor-net|android-doctor|reconnect-network|build-base|rebuild|reset-container|reset-storage|reset-volumes|repair-nix|prune|agents|skills|open-url|open-in-editor|help|-h|--help)
       cmd="$1"
       shift
       ;;
@@ -853,8 +1034,12 @@ while [[ $# -gt 0 ]]; do
         install_force=1
         shift
         continue
+      elif [[ "$cmd" == "prune" ]]; then
+        prune_force=1
+        shift
+        continue
       fi
-      echo "--force is only valid with install/build/agents/skills" >&2
+      echo "--force is only valid with install/build/agents/skills/prune" >&2
       exit 1
       ;;
     --file)
@@ -900,44 +1085,48 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 ]] || { echo "--network requires host or bridge" >&2; exit 1; }
       NETWORK_MODE="$1"
+      network_selected=1
       shift
       ;;
     --android)
       case "$cmd" in
-        start|shell|warm|exec|android-doctor)
+        start|shell|warm|exec|android-doctor|mcp)
           android_mode=1
+          [[ "$cmd" != mcp ]] || mcp_android_selected=1
           shift
           continue
           ;;
         *)
-          echo "--android is only valid with start/shell/warm/exec/android-doctor" >&2
+          echo "--android is only valid with start/shell/warm/exec/android-doctor/mcp" >&2
           exit 1
           ;;
       esac
       ;;
     --emulator|--android-emulator)
       case "$cmd" in
-        start|shell|warm|exec|android-doctor)
+        start|shell|warm|exec|android-doctor|mcp)
           android_mode=1
           emulator_mode=1
+          [[ "$cmd" != mcp ]] || mcp_android_selected=1
           shift
           continue
           ;;
         *)
-          echo "--emulator/--android-emulator is only valid with start/shell/warm/exec/android-doctor" >&2
+          echo "--emulator/--android-emulator is only valid with start/shell/warm/exec/android-doctor/mcp" >&2
           exit 1
           ;;
       esac
       ;;
     --android-gpu)
       case "$cmd" in
-        start|shell|warm|exec|android-doctor)
+        start|shell|warm|exec|android-doctor|mcp)
           android_gpu=1
+          [[ "$cmd" != mcp ]] || mcp_android_selected=1
           shift
           continue
           ;;
         *)
-          echo "--android-gpu is only valid with start/shell/warm/exec/android-doctor" >&2
+          echo "--android-gpu is only valid with start/shell/warm/exec/android-doctor/mcp" >&2
           exit 1
           ;;
       esac
@@ -949,24 +1138,87 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --port)
-      if [[ "$cmd" == "serve" ]]; then
+      if [[ "$cmd" == "serve" || "$cmd" == "mcp" ]]; then
         shift
         [[ $# -gt 0 ]] || { echo "--port requires a value" >&2; exit 1; }
-        server_port="$1"
+        if [[ "$cmd" == "serve" ]]; then
+          server_port="$1"
+        else
+          mcp_port="$1"
+        fi
         shift
         continue
       fi
-      echo "--port is only valid with serve" >&2
+      echo "--port is only valid with serve or mcp" >&2
       exit 1
       ;;
     --stop)
-      if [[ "$cmd" == "serve" ]]; then
-        server_stop=1
+      if [[ "$cmd" == "serve" || "$cmd" == "mcp" ]]; then
+        if [[ "$cmd" == "serve" ]]; then
+          server_stop=1
+        else
+          mcp_stop=1
+        fi
         shift
         continue
       fi
-      echo "--stop is only valid with serve" >&2
+      echo "--stop is only valid with serve or mcp" >&2
       exit 1
+      ;;
+    --status)
+      [[ "$cmd" == "mcp" ]] || { echo "--status is only valid with mcp" >&2; exit 1; }
+      mcp_status=1
+      shift
+      ;;
+    --json)
+      [[ "$cmd" == "mcp" ]] || { echo "--json is only valid with mcp" >&2; exit 1; }
+      mcp_json=1
+      shift
+      ;;
+    --local)
+      [[ "$cmd" == "mcp" ]] || { echo "--local is only valid with mcp" >&2; exit 1; }
+      mcp_local_selected=1
+      shift
+      ;;
+    --tunnel)
+      [[ "$cmd" == "mcp" ]] || { echo "--tunnel is only valid with mcp" >&2; exit 1; }
+      mcp_tunnel_selected=1
+      shift
+      if [[ $# -gt 0 && "$1" != -* ]]; then
+        mcp_tunnel_id="$1"
+        shift
+      fi
+      ;;
+    --detach)
+      [[ "$cmd" == "mcp" ]] || { echo "--detach is only valid with mcp" >&2; exit 1; }
+      mcp_detach=1
+      shift
+      ;;
+    --sessions)
+      [[ "$cmd" == "mcp" ]] || { echo "--sessions is only valid with mcp" >&2; exit 1; }
+      mcp_sessions=1
+      shift
+      ;;
+    --attach)
+      [[ "$cmd" == "mcp" ]] || { echo "--attach is only valid with mcp" >&2; exit 1; }
+      shift
+      [[ $# -gt 0 ]] || { echo "--attach requires a thread ID" >&2; exit 1; }
+      mcp_attach_id="$1"
+      shift
+      ;;
+    --read-only|--ship)
+      [[ "$cmd" == "mcp" ]] || { echo "$1 is only valid with mcp" >&2; exit 1; }
+      [[ "$mcp_mode_selected" -eq 0 ]] || {
+        echo "--read-only and --ship are mutually exclusive." >&2
+        exit 1
+      }
+      mcp_mode_selected=1
+      if [[ "$1" == "--read-only" ]]; then
+        mcp_mode="read"
+      else
+        mcp_mode="ship"
+      fi
+      shift
       ;;
     --logs)
       follow_logs_on_start=1
@@ -1035,6 +1287,13 @@ while [[ $# -gt 0 ]]; do
           echo "open-in-editor accepts at most FILE [LINE] [COLUMN]" >&2
           exit 1
         fi
+      elif [[ "$cmd" == "mcp" ]]; then
+        [[ "$workspace_explicit" -eq 0 ]] || {
+          echo "mcp accepts at most one WORKSPACE argument." >&2
+          exit 1
+        }
+        workspace="$(realpath "$1")"
+        workspace_explicit=1
       else
         workspace="$(realpath "$1")"
       fi
@@ -1065,9 +1324,83 @@ if [[ -n "$server_port" ]] && { ! [[ "$server_port" =~ ^[0-9]+$ ]] || [[ "$serve
   exit 1
 fi
 
+if [[ -n "$mcp_port" ]] && { ! [[ "$mcp_port" =~ ^[0-9]+$ ]] || [[ "$mcp_port" -lt 1024 ]] || [[ "$mcp_port" -gt 65535 ]]; }; then
+  echo "Invalid --port value: $mcp_port (expected integer 1024-65535)" >&2
+  exit 1
+fi
+
+if [[ "$mcp_local_selected" -eq 1 && "$mcp_tunnel_selected" -eq 1 ]]; then
+  echo "mcp --local and --tunnel are mutually exclusive." >&2
+  exit 1
+fi
+
+if [[ -n "$mcp_tunnel_id" && ! "$mcp_tunnel_id" =~ ^tunnel_[a-z0-9]{32}$ ]]; then
+  echo "Invalid --tunnel value: expected tunnel_<32 lowercase letters or digits>." >&2
+  exit 1
+fi
+
+if [[ "$mcp_status" -eq 1 && "$mcp_stop" -eq 1 ]]; then
+  echo "mcp --status and --stop are mutually exclusive." >&2
+  exit 1
+fi
+
+if [[ "$mcp_detach" -eq 1 && "$mcp_tunnel_selected" -ne 1 ]]; then
+  echo "mcp --detach requires --tunnel." >&2
+  exit 1
+fi
+
+if [[ "$cmd" == mcp && ( "$mcp_sessions" -eq 1 || -n "$mcp_attach_id" ) ]] &&
+  { [[ "$mcp_sessions" -eq 1 && -n "$mcp_attach_id" ]] ||
+    [[ "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 || "$mcp_tunnel_selected" -eq 1 ||
+       "$mcp_detach" -eq 1 || "$mcp_json" -eq 1 || "$mcp_mode_selected" -eq 1 ]]; }; then
+  echo "MCP session commands cannot be combined with start, status, or stop options." >&2
+  exit 1
+fi
+
+if [[ "$cmd" == "mcp" && ( "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 ) ]] &&
+  { [[ "$mcp_mode_selected" -eq 1 ]] || [[ -n "$mcp_port" ]] ||
+    [[ "$mcp_local_selected" -eq 1 ]] || [[ "$mcp_tunnel_selected" -eq 1 ]] ||
+    [[ "$mcp_detach" -eq 1 ]]; }; then
+  echo "MCP transport, mode, and port options cannot be combined with --status or --stop." >&2
+  exit 1
+fi
+
+if [[ "$cmd" == "mcp" && -n "$instance_arg" ]]; then
+  echo "mcp does not support --instance; one MCP process is allowed per workspace." >&2
+  exit 1
+fi
+
+if [[ "$mcp_android_selected" -eq 1 ]] &&
+  { [[ "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 || "$mcp_sessions" -eq 1 || -n "$mcp_attach_id" ]]; }; then
+  echo "MCP Android flags are only valid when starting MCP." >&2
+  exit 1
+fi
+
 if [[ "$cmd" == "serve" && "$NETWORK_MODE" != "host" ]]; then
   echo "ai-sandbox serve requires host networking for loopback-only SSH forwarding." >&2
   exit 1
+fi
+
+if [[ "$cmd" == "mcp" ]]; then
+  mcp_expected_network=bridge
+  [[ "$android_mode" -eq 0 ]] || mcp_expected_network=host
+  if [[ "$network_selected" -eq 1 && "$NETWORK_MODE" != "$mcp_expected_network" ]]; then
+    echo "MCP network must be $mcp_expected_network for the selected Android mode." >&2
+    exit 1
+  fi
+  NETWORK_MODE="$mcp_expected_network"
+  if [[ -n "$mcp_port" || "$mcp_local_selected" -eq 1 ]]; then
+    echo "MCP uses stdio through Secure Tunnel; --port and --local are unavailable." >&2
+    exit 1
+  fi
+  if [[ "$mcp_mode_selected" -eq 1 ]]; then
+    echo "Winx stdio exposes Bash; --read-only and --ship are unavailable." >&2
+    exit 1
+  fi
+  if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 && "$mcp_sessions" -eq 0 && -z "$mcp_attach_id" && "$mcp_tunnel_selected" -eq 0 ]]; then
+    echo "Start Winx MCP with: ais mcp --tunnel" >&2
+    exit 1
+  fi
 fi
 
 if [[ "$android_mode" -eq 1 && "$NETWORK_MODE" != "host" ]]; then
@@ -1250,33 +1583,25 @@ case "$cmd" in
     exit 0
     ;;
   repair-nix)
-    home_mount_spec=""
-    nix_mount_spec=""
     selinux_label_opt="$(selinux_mount_label_opt)"
-    if [[ "$HOME_STORAGE" == /* ]]; then
-      mkdir -p "$HOME_STORAGE"
-      home_mount_spec="$HOME_STORAGE:/sandbox-home${selinux_label_opt}"
-    else
-      home_mount_spec="$HOME_STORAGE:/sandbox-home${selinux_label_opt},U"
-    fi
-
-    if [[ "$NIX_STORAGE" == /* ]]; then
-      mkdir -p "$NIX_STORAGE"
-      nix_mount_spec="$NIX_STORAGE:/nix${selinux_label_opt}"
-    else
-      nix_mount_spec="$NIX_STORAGE:/nix${selinux_label_opt},U"
-    fi
+    home_mount_spec="$(storage_mount_spec "$HOME_STORAGE" /sandbox-home "$selinux_label_opt")"
+    nix_mount_spec="$(storage_mount_spec "$NIX_STORAGE" /nix "$selinux_label_opt")"
 
     exec podman run --rm -it \
       --userns=keep-id \
       --user "$(id -u):$(id -g)" \
       --group-add keep-groups \
+      --label ai-sandbox=true \
       -e HOME=/sandbox-home \
       -e XDG_RUNTIME_DIR=/tmp/xdg-runtime \
       -e AI_SANDBOX_MODE=repair \
       -v "$home_mount_spec" \
       -v "$nix_mount_spec" \
       "$IMAGE"
+    ;;
+  prune)
+    run_prune
+    exit $?
     ;;
   agents)
     [[ -n "$sync_mode" ]] || { echo "agents requires pull, push, reset, or clear" >&2; exit 1; }
@@ -1345,6 +1670,12 @@ case "$cmd" in
   serve)
     [[ "$server_stop" -eq 1 ]] || ensure_image_exists
     ;;
+  mcp)
+    if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 &&
+      "$mcp_sessions" -eq 0 && -z "$mcp_attach_id" ]]; then
+      ensure_image_exists
+    fi
+    ;;
 esac
 
 [[ -d "$workspace" ]] || { echo "Workspace does not exist: $workspace" >&2; exit 1; }
@@ -1387,6 +1718,21 @@ if command -v git >/dev/null 2>&1 && git -C "$workspace" rev-parse --is-inside-w
   fi
 fi
 
+if [[ "$cmd" == "mcp" ]]; then
+  mcp_require_home_path
+  if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 && "$mount_root" != "$workspace" ]]; then
+    echo "ai-sandbox mcp cannot expose a submodule through an expanded parent mount." >&2
+    echo "Run it from the top-level mounted repository instead: $mount_root" >&2
+    exit 1
+  fi
+  if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 && "$mcp_tunnel_selected" -eq 1 ]]; then
+    mcp_resolve_tunnel_credentials \
+      "$mcp_tunnel_id" \
+      mcp_tunnel_id \
+      mcp_runtime_api_key
+  fi
+fi
+
 flake_arg_container="${flake_arg:-}"
 if [[ -n "${flake_arg:-}" ]]; then
   if [[ "$flake_arg" == "$mount_root" || "$flake_arg" == "$mount_root/"* ]]; then
@@ -1406,6 +1752,8 @@ if [[ "$cmd" == "shell" || "$cmd" == "warm" || "$cmd" == "exec" ]]; then
   launch_context="shell"
 elif [[ "$cmd" == "serve" ]]; then
   launch_context="code-server"
+elif [[ "$cmd" == "mcp" ]]; then
+  launch_context="mcp"
 elif [[ "$cmd" == "android-doctor" ]]; then
   launch_context="android-doctor"
 fi
@@ -1433,6 +1781,31 @@ else
   container_name="$base_container_name-$instance_arg"
 fi
 
+if [[ "$cmd" == "mcp" ]]; then
+  mcp_metadata="$(mcp_runtime_host_dir "$workspace_hash")/runtime/metadata.json"
+  mcp_recorded_container="$(mcp_read_metadata_field "$mcp_metadata" container)"
+  mcp_recorded_reuse="$(mcp_read_metadata_field "$mcp_metadata" reuse_emulator)"
+  mcp_recorded_profile="$(mcp_read_metadata_field "$mcp_metadata" profile)"
+  if [[ "$mcp_android_selected" -eq 1 ]]; then
+    if [[ -f "$mcp_metadata" && "$mcp_recorded_container" != "$container_name" ]]; then
+      echo "MCP is recorded for another container; stop it before changing Android mode." >&2
+      exit 1
+    fi
+  elif [[ "$mcp_recorded_reuse" == true ]]; then
+    # Keep status and stop safe for MCP sessions started with the old reuse mode.
+    mcp_reuse_emulator=1
+    container_name="$mcp_recorded_container"
+  elif [[ "$mcp_recorded_profile" == android || "$mcp_recorded_profile" == emulator ||
+    "$mcp_recorded_profile" == emulator-gpu ]]; then
+    android_mode=1
+    [[ "$mcp_recorded_profile" == android ]] || emulator_mode=1
+    [[ "$mcp_recorded_profile" != emulator-gpu ]] || android_gpu=1
+    runtime_profile="$mcp_recorded_profile"
+    NETWORK_MODE=host
+    container_name="$mcp_recorded_container"
+  fi
+fi
+
 if [[ "$cmd" == "serve" && "$server_stop" -eq 1 ]]; then
   if podman inspect "$container_name" >/dev/null 2>&1; then
     podman stop "$container_name" >/dev/null
@@ -1442,13 +1815,49 @@ if [[ "$cmd" == "serve" && "$server_stop" -eq 1 ]]; then
   fi
   exit 0
 fi
+if [[ "$cmd" == "mcp" && "$mcp_status" -eq 1 ]]; then
+  mcp_emit_status "$workspace" "$container_name" "$workspace_hash" "$mcp_json"
+  exit 0
+fi
+
+if [[ "$cmd" == "mcp" && "$mcp_stop" -eq 1 ]]; then
+  mcp_stop_rc=0
+  mcp_stop_process "$container_name" "$workspace_hash" "$mcp_json" || mcp_stop_rc=$?
+  if [[ "$mcp_json" -eq 1 ]]; then
+    mcp_emit_status "$workspace" "$container_name" "$workspace_hash" 1
+  fi
+  exit "$mcp_stop_rc"
+fi
+
+if [[ "$cmd" == "mcp" && "$mcp_sessions" -eq 1 ]]; then
+  if ! container_is_running "$container_name"; then
+    echo "MCP container is not running." >&2
+    exit 1
+  fi
+  podman exec "$container_name" \
+    "/sandbox-home/.local/share/ai-sandbox/mcp/winx/$AI_SANDBOX_MCP_VERSION/winx-code-agent" list
+  echo "Follow one with: ais mcp --attach THREAD_ID"
+  exit 0
+fi
+
+if [[ "$cmd" == "mcp" && -n "$mcp_attach_id" ]]; then
+  if ! container_is_running "$container_name"; then
+    echo "MCP container is not running." >&2
+    exit 1
+  fi
+  exec podman exec -it "$container_name" \
+    "/sandbox-home/.local/share/ai-sandbox/mcp/winx/$AI_SANDBOX_MCP_VERSION/winx-code-agent" \
+    attach "$mcp_attach_id" --follow
+fi
 
 code_server_port=""
 if [[ "$cmd" == "serve" ]]; then
   code_server_port="$(resolve_code_server_port "$workspace_hash" "$instance_arg" "$container_name" "$server_port")"
 fi
 
-echo "$container_name" > "$STATE_DIR/last-container"
+if [[ "$cmd" != "mcp" ]]; then
+  echo "$container_name" > "$STATE_DIR/last-container"
+fi
 
 # Keep process/cache/webview data per instance to avoid Chromium profile
 # collisions, while sharing user-level settings/extensions for a desktop-like
@@ -1464,7 +1873,7 @@ theme="$(detect_theme)"
 
 host_dbus_args=()
 x11_args=()
-if [[ "$cmd" != "install" && "$cmd" != "serve" && "$cmd" != "android-doctor" ]]; then
+if [[ "$cmd" != "install" && "$cmd" != "serve" && "$cmd" != "mcp" && "$cmd" != "android-doctor" ]]; then
   xauth_file="${XAUTHORITY:-$HOME/.Xauthority}"
   if [[ -n "${DISPLAY:-}" && -d /tmp/.X11-unix ]]; then
     x11_args+=(
@@ -1492,6 +1901,28 @@ fi
 
 container_mode="$cmd"
 [[ "$cmd" == "serve" ]] && container_mode="server"
+[[ "$cmd" == "mcp" ]] && container_mode="idle"
+
+mcp_mount_args=()
+if [[ "$cmd" == "mcp" ]]; then
+  mcp_runtime_host="$(mcp_runtime_host_dir "$workspace_hash")"
+  mkdir -p "$mcp_runtime_host/runtime"
+  chmod 0700 "$mcp_runtime_host"
+  home_mount_spec="$mcp_runtime_host:/sandbox-home${selinux_label_opt}"
+  if [[ "$mcp_reuse_emulator" -eq 0 && -f "$HOME_STORAGE/.codex/AGENTS.md" ]]; then
+    mkdir -p "$mcp_runtime_host/.codex"
+    if [[ ! -f "$mcp_runtime_host/.codex/AGENTS.md" ]]; then
+      cp "$HOME_STORAGE/.codex/AGENTS.md" "$mcp_runtime_host/.codex/AGENTS.md"
+    fi
+    mcp_agents_mount_opts="ro"
+    [[ -z "$selinux_label_opt" ]] || mcp_agents_mount_opts+=",Z"
+    mcp_mount_args=(
+      -v "$HOME_STORAGE/.codex/AGENTS.md:/sandbox-home/.codex/AGENTS.md:$mcp_agents_mount_opts"
+    )
+  fi
+fi
+
+tmp_host_dir="$(prepare_tmp_mount "$TMP_ROOT" "$container_name")"
 
 android_args=()
 emulator_device_args=()
@@ -1550,6 +1981,8 @@ common_args=(
   -v "$mount_root:/workspace${selinux_label_opt}"
   -v "$home_mount_spec"
   -v "$nix_mount_spec"
+  -v "$tmp_host_dir:/tmp${selinux_label_opt}"
+  "${mcp_mount_args[@]}"
   "${android_args[@]}"
   "${emulator_device_args[@]}"
   "${x11_args[@]}"
@@ -1664,6 +2097,102 @@ run_exec() {
   exec podman exec -it "$container_name" /bin/bash -lc 'cd "$1"; shift; exec "$@"' _ "$container_workspace" "${exec_command[@]}"
 }
 
+run_mcp() {
+  local existing_state actual_network runtime_dir lock_file tunnel_json existing_mode existing_version legacy_container recorded_id new_tunnel=0
+  runtime_dir="$(mcp_runtime_host_dir "$workspace_hash")"
+  lock_file="$runtime_dir/runtime/lock"
+  mkdir -p "$(dirname "$lock_file")"
+  exec 8>"$lock_file"
+  if ! flock -w 2 8; then
+    echo "Another MCP operation is already in progress for this workspace." >&2
+    echo "Wait for it to finish, or stop the stuck process before retrying." >&2
+    return 1
+  fi
+
+  legacy_container="ai-sandbox-${project_slug}-workspace-${workspace_hash}-default"
+  existing_state="$(podman inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
+  if [[ "$mcp_reuse_emulator" -eq 1 ]]; then
+    if [[ "$existing_state" != "running" ]]; then
+      echo "The emulator-enabled container is no longer running: $container_name" >&2
+      return 1
+    fi
+    recorded_id="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" container_id)"
+    if [[ -n "$recorded_id" && "$recorded_id" != "$(mcp_container_id "$container_name")" ]]; then
+      echo "The reused container changed; stop MCP before reconnecting." >&2
+      return 1
+    fi
+    echo "Reusing emulator-enabled sandbox container $container_name..." >&2
+  elif [[ "$existing_state" == "running" ]]; then
+    echo "Reusing sandbox workspace container $container_name..." >&2
+  elif [[ -n "$existing_state" ]]; then
+    echo "Starting sandbox workspace container $container_name..." >&2
+    podman start "$container_name" >/dev/null
+  else
+    echo "Creating sandbox workspace container $container_name..." >&2
+    podman run -d \
+      "${common_args[@]}" \
+      "${network_args[@]}" \
+      "$IMAGE" >/dev/null
+  fi
+
+  actual_network="$(podman inspect -f '{{.HostConfig.NetworkMode}}' "$container_name")"
+  if [[ "$mcp_reuse_emulator" -eq 1 && "$actual_network" != host ]]; then
+    echo "The reused emulator container must use host networking for adb." >&2
+    return 1
+  fi
+  if [[ "$mcp_reuse_emulator" -eq 0 && "$actual_network" != "$NETWORK_MODE" ]]; then
+    echo "MCP container networking does not match $NETWORK_MODE; recreate it." >&2
+    return 1
+  fi
+  tunnel_json="$(mcp_tunnel_status_json \
+    "$container_name" "$runtime_dir" \
+    "$(mcp_runtime_container_dir "$workspace_hash" "$mcp_reuse_emulator")")"
+  existing_mode="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" mode)"
+  existing_version="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" version)"
+  if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" == true &&
+    -n "$existing_version" && "$existing_version" != "$AI_SANDBOX_MCP_VERSION" ]]; then
+    echo "MCP is running Winx $existing_version; stop it before upgrading." >&2
+    return 1
+  fi
+  if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" == true &&
+    -n "$existing_mode" && "$existing_mode" != "$mcp_mode" ]]; then
+    echo "MCP is already running with mode=$existing_mode." >&2
+    echo "Stop it before changing mode." >&2
+    return 1
+  fi
+  if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" != true ]]; then
+    new_tunnel=1
+    trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 130' INT
+    trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 143' TERM
+    trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 129' HUP
+  fi
+  if ! mcp_start_tunnel \
+    "$container_name" "$workspace_hash" \
+    "$mcp_tunnel_id" "$mcp_runtime_api_key" \
+    "$legacy_container"; then
+    trap - INT TERM HUP
+    [[ "$new_tunnel" -eq 0 ]] || mcp_stop_process "$container_name" "$workspace_hash" 1 || true
+    return 1
+  fi
+  mcp_write_metadata \
+    "$runtime_dir/runtime/metadata.json" \
+    "$(mcp_container_id "$container_name")" "$mcp_mode" \
+    "$container_name" "$mcp_reuse_emulator" "$runtime_profile"
+  if ! mcp_store_tunnel_credentials \
+    "$mcp_tunnel_id" "$mcp_runtime_api_key"; then
+    trap - INT TERM HUP
+    [[ "$new_tunnel" -eq 0 ]] || mcp_stop_process "$container_name" "$workspace_hash" 1 || true
+    return 1
+  fi
+  mcp_runtime_api_key=""
+  mcp_emit_status "$workspace" "$container_name" "$workspace_hash" "$mcp_json"
+  if [[ "$mcp_tunnel_selected" -eq 1 && "$mcp_detach" -eq 0 ]]; then
+    flock -u 8
+    mcp_supervise_tunnel "$container_name" "$workspace_hash"
+  fi
+  trap - INT TERM HUP
+}
+
 run_install() {
   local existing_container install_args=()
   local start_ts launch_ts run_start_ts run_end_ts
@@ -1724,6 +2253,7 @@ run_install() {
 case "$cmd" in
   start) run_detached ;;
   serve) run_detached ;;
+  mcp) run_mcp ;;
   shell) run_shell ;;
   warm) run_interactive ;;
   exec) run_exec ;;
