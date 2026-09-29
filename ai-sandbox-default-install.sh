@@ -12,13 +12,13 @@ while [[ $# -gt 0 ]]; do
       ;;
     --only)
       shift
-      [[ $# -gt 0 ]] || { echo "--only requires all|codex|opencode|vscode|code-server" >&2; exit 2; }
+      [[ $# -gt 0 ]] || { echo "--only requires all|codex|opencode|pi|vscode|code-server" >&2; exit 2; }
       only="$1"
       shift
       ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: ai-sandbox-default-install [--force] [--only all|codex|opencode|vscode|code-server]" >&2
+      echo "Usage: ai-sandbox-default-install [--force] [--only all|codex|opencode|pi|vscode|code-server]" >&2
       exit 2
       ;;
   esac
@@ -58,6 +58,22 @@ install_opencode() {
   echo "AI_SANDBOX: opencode installation complete."
 }
 
+install_pi() {
+  if [[ "$force" -eq 0 ]] && \
+    npm list -g --depth=0 \
+      @earendil-works/pi-coding-agent \
+      >/dev/null 2>&1; then
+    echo "AI_SANDBOX: Pi already present in user space; skipping."
+    return
+  fi
+  echo "AI_SANDBOX: installing Pi in user space..."
+  log_cmd npm install -g --ignore-scripts \
+    @earendil-works/pi-coding-agent@latest
+  npm install -g --ignore-scripts \
+    @earendil-works/pi-coding-agent@latest
+  echo "AI_SANDBOX: Pi installation complete."
+}
+
 install_vscode() {
   echo "AI_SANDBOX: ensuring user-space VS Code is available..."
   if [[ "$force" -eq 1 ]]; then
@@ -88,6 +104,7 @@ case "$only" in
   all)
     install_codex
     install_opencode
+    install_pi
     install_vscode
     ;;
   codex)
@@ -96,6 +113,9 @@ case "$only" in
   opencode)
     install_opencode
     ;;
+  pi)
+    install_pi
+    ;;
   vscode)
     install_vscode
     ;;
@@ -103,7 +123,7 @@ case "$only" in
     install_code_server
     ;;
   *)
-    echo "Invalid --only value: $only (expected all|codex|opencode|vscode|code-server)" >&2
+    echo "Invalid --only value: $only (expected all|codex|opencode|pi|vscode|code-server)" >&2
     exit 2
     ;;
 esac

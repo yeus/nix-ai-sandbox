@@ -112,6 +112,7 @@ COPY ai-sandbox-vscode-update.sh /usr/local/bin/ai-sandbox-vscode-update
 COPY ai-sandbox-code-server-update.sh /usr/local/bin/ai-sandbox-code-server-update
 COPY ai-sandbox-user-code.sh /usr/local/bin/ai-sandbox-user-code
 COPY ai-sandbox-default-install.sh /usr/local/bin/ai-sandbox-default-install
+COPY ai-sandbox-agent-config.sh /usr/local/bin/ai-sandbox-agent-config
 COPY mcp/install.sh /usr/local/bin/ai-sandbox-mcp-install
 COPY mcp/launch.sh /usr/local/bin/ai-sandbox-mcp-launch
 COPY mcp/http-launch.sh /usr/local/bin/ai-sandbox-mcp-http-launch
@@ -127,6 +128,7 @@ COPY mcp/tunnel-start.sh /usr/local/bin/ai-sandbox-mcp-tunnel-start
 COPY mcp/tunnel-status.sh /usr/local/bin/ai-sandbox-mcp-tunnel-status
 COPY mcp/tunnel-stop.sh /usr/local/bin/ai-sandbox-mcp-tunnel-stop
 COPY AGENTS.md /usr/local/share/ai-sandbox/default-AGENTS.md
+COPY skills /usr/local/share/ai-sandbox/default-skills
 
 RUN chmod +x \
     /usr/local/bin/container-entrypoint.sh \
@@ -136,6 +138,7 @@ RUN chmod +x \
     /usr/local/bin/ai-sandbox-code-server-update \
     /usr/local/bin/ai-sandbox-user-code \
     /usr/local/bin/ai-sandbox-default-install \
+    /usr/local/bin/ai-sandbox-agent-config \
     /usr/local/bin/ai-sandbox-mcp-install \
     /usr/local/bin/ai-sandbox-mcp-launch \
     /usr/local/bin/ai-sandbox-mcp-http-launch \

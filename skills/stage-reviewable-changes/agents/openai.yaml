@@ -1,0 +1,4 @@
+interface:
+  display_name: "Stage Reviewable Changes"
+  short_description: "Stage a few substantial, reviewable branch commits"
+  default_prompt: "Use $stage-reviewable-changes to organize this branch into a short series of substantial, squash-friendly staged batches without committing."

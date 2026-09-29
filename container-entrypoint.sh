@@ -58,47 +58,6 @@ fi
 
 chmod 700 "$XDG_RUNTIME_DIR" || true
 
-ensure_codex_default_instructions() {
-  local codex_dir default_agents target_agents disable_seed
-  codex_dir="$CODEX_HOME"
-  default_agents="/usr/local/share/ai-sandbox/default-AGENTS.md"
-  target_agents="$codex_dir/AGENTS.md"
-  disable_seed="$codex_dir/.disable_default_agents_seed"
-
-  mkdir -p "$codex_dir"
-
-  if [[ -e "$disable_seed" ]]; then
-    return
-  fi
-
-  if [[ -f "$target_agents" || ! -f "$default_agents" ]]; then
-    return
-  fi
-
-  cp "$default_agents" "$target_agents"
-}
-
-ensure_opencode_default_instructions() {
-  local opencode_config_dir codex_agents opencode_agents
-  opencode_config_dir="$HOME/.config/opencode"
-  codex_agents="$CODEX_HOME/AGENTS.md"
-  opencode_agents="$opencode_config_dir/AGENTS.md"
-
-  mkdir -p "$opencode_config_dir"
-
-  if [[ -L "$opencode_agents" ]]; then
-    return
-  fi
-
-  if [[ -e "$opencode_agents" && ! -L "$opencode_agents" ]]; then
-    rm -f "$opencode_agents"
-  fi
-
-  if [[ -f "$codex_agents" ]]; then
-    ln -sf "$codex_agents" "$opencode_agents"
-  fi
-}
-
 ensure_codex_global_writable_root() {
   local codex_dir config_file root
   codex_dir="$CODEX_HOME"
@@ -562,8 +521,7 @@ ensure_ai_shell_prompt_files
 ensure_ai_sandbox_cli_shim
 ensure_codex_cli_shim
 ensure_opencode_cli_shim
-ensure_codex_default_instructions
-ensure_opencode_default_instructions
+/usr/local/bin/ai-sandbox-agent-config
 ensure_codex_global_writable_root
 
 AI_SANDBOX_NIX_AVAILABLE=1

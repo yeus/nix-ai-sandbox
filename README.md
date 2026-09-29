@@ -8,8 +8,10 @@ Files in this folder:
 
 - `Dockerfile`
 - `container-entrypoint.sh`
+- `ai-sandbox-agent-config.sh`
 - `ai-sandbox`
 - `ai-sandbox.nix`
+- `skills/`
 - `README.md`
 
 ## Why this exists
@@ -107,7 +109,7 @@ Build/update the base image only:
 ai-sandbox build-base
 ````
 
-Build the image and then install default user-space software (Codex + VS Code):
+Build the image and then install the default user-space agents and VS Code:
 
 ```bash
 ai-sandbox build .
@@ -119,6 +121,8 @@ Install or refresh default user-space software without rebuilding:
 ai-sandbox install .
 ai-sandbox install . --force
 ai-sandbox install . --only codex
+ai-sandbox install . --only opencode
+ai-sandbox install . --only pi
 ai-sandbox install . --only vscode
 ```
 
@@ -181,7 +185,7 @@ recorded Podman name matches the configured sandbox image.
 Run pruning from the host shell where Podman is available. The sandbox itself
 does not expose the host Podman socket or the host storage paths.
 
-Sync global Codex instructions (sandbox-wide, not project-local):
+Sync shared global instructions (sandbox-wide, not project-local):
 
 ```bash
 ai-sandbox agents pull
@@ -194,13 +198,16 @@ ai-sandbox agents pull --file ./AGENTS.md --force
 Inside sandbox terminals, `ai-sandbox` is available as an alias to
 `/workspace/ai-sandbox/ai-sandbox`, so these `agents` commands can be run there too.
 
-Sync global Codex skills:
+Sync shared user-owned skills:
 
 ```bash
 ai-sandbox skills pull
 ai-sandbox skills push
 ai-sandbox skills push --dir ./skills --force
 ```
+
+The shared directory is `~/.agents/skills`. Sync rejects a source containing
+`.system`, so Codex-managed built-in skills are not copied or overwritten.
 
 Warm the current project flake into the shared `/nix` storage directory:
 
@@ -856,7 +863,7 @@ Practical behavior:
 - extensions installed in one instance appear in all instances
 - webview/process/cache internals remain isolated per instance to avoid cross-container collisions
 
-## Persistent Home, Codex Instructions, and Updates
+## Persistent Home, Shared Agent Resources, and Updates
 
 Sandbox home is persisted in `~/.cache/ai-sandbox/home` by default (configurable), and is mounted at `/sandbox-home` inside containers.
 
@@ -869,7 +876,7 @@ Sandbox home is persisted in `~/.cache/ai-sandbox/home` by default (configurable
 /sandbox-home/.codex
 ```
 
-Codex global instructions are seeded once (if missing) to:
+Global instructions are seeded once (if missing) to:
 
 ```bash
 /sandbox-home/.codex/AGENTS.md
@@ -881,8 +888,31 @@ from image default:
 /usr/local/share/ai-sandbox/default-AGENTS.md
 ```
 
-This means global instructions and skills are persisted on host storage and can
+OpenCode and Pi use symlinks to the same file:
+
+```text
+~/.config/opencode/AGENTS.md
+~/.pi/agent/AGENTS.md
+```
+
+User-owned skills are seeded from the image's checked-in `skills/` directory
+into `~/.agents/skills`. OpenCode and Pi discover that standard location
+directly. Codex receives one symlink per user-owned skill in
+`~/.codex/skills`, leaving its managed `.system` directory untouched.
+
+This means global instructions and user skills persist on host storage and can
 be modified from any workspace. Project-local `AGENTS.md` remains separate.
+
+tycli is not installed by this repository and its source is not part of this
+checkout. To join the same global layer, its resource loader must read:
+
+```text
+/sandbox-home/.codex/AGENTS.md
+/sandbox-home/.agents/skills
+```
+
+Do not add environment variables or config keys unless tycli implements them;
+setting an unused path would only make the integration appear to work.
 
 ai-sandbox also ensures `~/.codex/config.toml` contains:
 
@@ -910,6 +940,15 @@ Codex is installed in user space (`~/.npm-global`) and persisted in sandbox home
 ```bash
 ai-sandbox install . --only codex
 ais codex --version
+```
+
+OpenCode and Pi are installed in the same user-space prefix:
+
+```bash
+ai-sandbox install . --only opencode
+ai-sandbox install . --only pi
+ais opencode --version
+ais pi --version
 ```
 
 VS Code runs from a user-space install in sandbox home:

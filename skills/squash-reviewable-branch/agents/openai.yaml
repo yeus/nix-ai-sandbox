@@ -1,0 +1,4 @@
+interface:
+  display_name: "Squash Reviewable Branch"
+  short_description: "Consolidate branches without losing messages"
+  default_prompt: "Use $squash-reviewable-branch to consolidate this feature branch into a few thematic commits while retaining every original commit message."
