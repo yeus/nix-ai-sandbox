@@ -361,10 +361,23 @@ another ID; stop it before starting with a different one.
 The pinned, checksum-verified tunnel client launches pinned Winx over stdio.
 Winx exposes a persistent Bash shell plus file reading and editing tools rooted
 at `/workspace`. The tunnel key is removed from Winx's environment before it
-starts. The MCP container has its own persistent home directory. It uses bridge
-networking by default, so it cannot see the normal sandbox home or host loopback
-services. The workspace and Nix storage remain mounted read/write so commands
-can work.
+starts. The MCP container has its own persistent home directory. It uses
+private networking by default: Podman uses a bridge when rootful and its
+rootless backend (such as `pasta`) when rootless. The MCP container cannot see
+the normal sandbox home or host loopback services. The workspace and Nix
+storage remain mounted read/write so commands can work.
+
+If MCP needs host-local services such as a dev server listening on
+`127.0.0.1`, opt into host networking when starting it:
+
+```bash
+ais mcp --tunnel --network host
+```
+
+This gives MCP's Bash access to services on the host network. Private
+networking remains the default. Podman fixes a container's network mode when
+it is created; to switch an existing MCP container, stop MCP and remove that
+container before restarting with the other mode.
 
 Winx asks the calling AI to read the workspace's `AGENTS.md` and the Codex
 instructions at `/sandbox-home/.codex/AGENTS.md` after initialization. If the

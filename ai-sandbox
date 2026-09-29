@@ -31,13 +31,14 @@ Usage:
   ai-sandbox serve [WORKSPACE] [--instance NAME] --stop
     Start or stop browser-based code-server on a stable loopback port.
 
-  ai-sandbox mcp [WORKSPACE] --tunnel [TUNNEL_ID] [--detach]
+  ai-sandbox mcp [WORKSPACE] --tunnel [TUNNEL_ID] [--network bridge|host] [--detach]
   ai-sandbox mcp [WORKSPACE] --tunnel [--android|--emulator] [--android-gpu]
   ai-sandbox mcp [WORKSPACE] --status [--json]
   ai-sandbox mcp [WORKSPACE] --stop [--json]
   ai-sandbox mcp [WORKSPACE] --sessions
   ai-sandbox mcp [WORKSPACE] --attach THREAD_ID
     Start, inspect, or stop Winx MCP with sandboxed Bash access.
+    Private networking is the default; --network host opts into host services.
 
   ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--android|--emulator|--android-emulator] [--android-gpu] [-- COMMAND [ARGS...]]
     Start/attach the sandbox and open an interactive shell (or run command after --).
@@ -1335,7 +1336,8 @@ fi
 if [[ "$cmd" == mcp && ( "$mcp_sessions" -eq 1 || -n "$mcp_attach_id" ) ]] &&
   { [[ "$mcp_sessions" -eq 1 && -n "$mcp_attach_id" ]] ||
     [[ "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 || "$mcp_tunnel_selected" -eq 1 ||
-       "$mcp_detach" -eq 1 || "$mcp_json" -eq 1 || "$mcp_mode_selected" -eq 1 ]]; }; then
+       "$mcp_detach" -eq 1 || "$mcp_json" -eq 1 || "$mcp_mode_selected" -eq 1 ||
+       "$network_selected" -eq 1 ]]; }; then
   echo "MCP session commands cannot be combined with start, status, or stop options." >&2
   exit 1
 fi
@@ -1343,8 +1345,8 @@ fi
 if [[ "$cmd" == "mcp" && ( "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 ) ]] &&
   { [[ "$mcp_mode_selected" -eq 1 ]] || [[ -n "$mcp_port" ]] ||
     [[ "$mcp_local_selected" -eq 1 ]] || [[ "$mcp_tunnel_selected" -eq 1 ]] ||
-    [[ "$mcp_detach" -eq 1 ]]; }; then
-  echo "MCP transport, mode, and port options cannot be combined with --status or --stop." >&2
+    [[ "$mcp_detach" -eq 1 ]] || [[ "$network_selected" -eq 1 ]]; }; then
+  echo "MCP start options cannot be combined with --status or --stop." >&2
   exit 1
 fi
 
@@ -1366,10 +1368,14 @@ fi
 
 if [[ "$cmd" == "mcp" ]]; then
   mcp_expected_network=bridge
-  [[ "$android_mode" -eq 0 ]] || mcp_expected_network=host
-  if [[ "$network_selected" -eq 1 && "$NETWORK_MODE" != "$mcp_expected_network" ]]; then
-    echo "MCP network must be $mcp_expected_network for the selected Android mode." >&2
-    exit 1
+  if [[ "$android_mode" -eq 1 ]]; then
+    mcp_expected_network=host
+    if [[ "$network_selected" -eq 1 && "$NETWORK_MODE" != host ]]; then
+      echo "MCP Android modes require host networking." >&2
+      exit 1
+    fi
+  elif [[ "$network_selected" -eq 1 ]]; then
+    mcp_expected_network="$NETWORK_MODE"
   fi
   NETWORK_MODE="$mcp_expected_network"
   if [[ -n "$mcp_port" || "$mcp_local_selected" -eq 1 ]]; then
@@ -1776,10 +1782,18 @@ if [[ "$cmd" == "mcp" ]]; then
     fi
   elif [[ "$mcp_recorded_reuse" == true ]]; then
     # Keep status and stop safe for MCP sessions started with the old reuse mode.
+    if [[ "$network_selected" -eq 1 && "$NETWORK_MODE" != host ]]; then
+      echo "MCP Android modes require host networking." >&2
+      exit 1
+    fi
     mcp_reuse_emulator=1
     container_name="$mcp_recorded_container"
   elif [[ "$mcp_recorded_profile" == android || "$mcp_recorded_profile" == emulator ||
     "$mcp_recorded_profile" == emulator-gpu ]]; then
+    if [[ "$network_selected" -eq 1 && "$NETWORK_MODE" != host ]]; then
+      echo "MCP Android modes require host networking." >&2
+      exit 1
+    fi
     android_mode=1
     [[ "$mcp_recorded_profile" == android ]] || emulator_mode=1
     [[ "$mcp_recorded_profile" != emulator-gpu ]] || android_gpu=1
@@ -1974,6 +1988,10 @@ common_args=(
 network_args=()
 if [[ "$NETWORK_MODE" == "host" ]]; then
   network_args=(--network host)
+elif [[ "$cmd" == "mcp" ]]; then
+  # Ask Podman for an isolated namespace explicitly. It resolves this to
+  # bridge networking when rootful and its rootless backend otherwise.
+  network_args=(--network private)
 fi
 
 run_android_doctor() {
@@ -2080,8 +2098,45 @@ run_exec() {
   exec podman exec -it "$container_name" /bin/bash -lc 'cd "$1"; shift; exec "$@"' _ "$container_workspace" "${exec_command[@]}"
 }
 
+mcp_network_mode_matches() {
+  local expected="$1"
+  local actual="$2"
+
+  if [[ "$expected" == host ]]; then
+    if [[ "$actual" == host ]]; then
+      return 0
+    fi
+    return 1
+  fi
+
+  case "$actual" in
+    bridge|private|pasta|pasta:*|slirp4netns|slirp4netns:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+mcp_require_network_mode() {
+  local container="$1"
+  local workspace="$2"
+  local expected="$3"
+  local actual="$4"
+
+  mcp_network_mode_matches "$expected" "$actual" && return 0
+  if [[ "$expected" == host ]]; then
+    echo "MCP needs host networking, but this container uses '$actual'." >&2
+  else
+    echo "MCP needs isolated networking (bridge or rootless pasta), but this container uses '$actual'." >&2
+  fi
+  echo "Podman fixes networking when it creates a container." >&2
+  echo "Stop MCP and remove this container before retrying:" >&2
+  printf '  ais mcp %q --stop\n' "$workspace" >&2
+  printf '  podman rm %s\n' "$container" >&2
+  echo "Then retry the same ais mcp command." >&2
+  return 1
+}
+
 run_mcp() {
-  local existing_state actual_network runtime_dir lock_file tunnel_json existing_mode existing_version legacy_container recorded_id new_tunnel=0
+  local existing_state actual_network expected_network runtime_dir lock_file tunnel_json existing_mode existing_version legacy_container recorded_id new_tunnel=0
   runtime_dir="$(mcp_runtime_host_dir "$workspace_hash")"
   lock_file="$runtime_dir/runtime/lock"
   mkdir -p "$(dirname "$lock_file")"
@@ -2092,6 +2147,12 @@ run_mcp() {
     return 1
   fi
 
+  expected_network="$NETWORK_MODE"
+  [[ "$mcp_reuse_emulator" -eq 0 ]] || expected_network=host
+  if [[ "$NETWORK_MODE" == host && "$android_mode" -eq 0 ]]; then
+    echo "MCP host networking is enabled; its Bash can reach host-local services." >&2
+  fi
+
   legacy_container="ai-sandbox-${project_slug}-workspace-${workspace_hash}-default"
   existing_state="$(podman inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
   if [[ "$mcp_reuse_emulator" -eq 1 ]]; then
@@ -2099,6 +2160,16 @@ run_mcp() {
       echo "The emulator-enabled container is no longer running: $container_name" >&2
       return 1
     fi
+  fi
+  if [[ -n "$existing_state" ]]; then
+    actual_network="$(podman inspect -f '{{.HostConfig.NetworkMode}}' "$container_name")"
+    if ! mcp_require_network_mode \
+      "$container_name" "$workspace" "$expected_network" "$actual_network"; then
+      return 1
+    fi
+  fi
+
+  if [[ "$mcp_reuse_emulator" -eq 1 ]]; then
     recorded_id="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" container_id)"
     if [[ -n "$recorded_id" && "$recorded_id" != "$(mcp_container_id "$container_name")" ]]; then
       echo "The reused container changed; stop MCP before reconnecting." >&2
@@ -2119,12 +2190,8 @@ run_mcp() {
   fi
 
   actual_network="$(podman inspect -f '{{.HostConfig.NetworkMode}}' "$container_name")"
-  if [[ "$mcp_reuse_emulator" -eq 1 && "$actual_network" != host ]]; then
-    echo "The reused emulator container must use host networking for adb." >&2
-    return 1
-  fi
-  if [[ "$mcp_reuse_emulator" -eq 0 && "$actual_network" != "$NETWORK_MODE" ]]; then
-    echo "MCP container networking does not match $NETWORK_MODE; recreate it." >&2
+  if ! mcp_require_network_mode \
+    "$container_name" "$workspace" "$expected_network" "$actual_network"; then
     return 1
   fi
   tunnel_json="$(mcp_tunnel_status_json \
