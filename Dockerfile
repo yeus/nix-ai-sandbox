@@ -114,6 +114,14 @@ COPY ai-sandbox-user-code.sh /usr/local/bin/ai-sandbox-user-code
 COPY ai-sandbox-default-install.sh /usr/local/bin/ai-sandbox-default-install
 COPY mcp/install.sh /usr/local/bin/ai-sandbox-mcp-install
 COPY mcp/launch.sh /usr/local/bin/ai-sandbox-mcp-launch
+COPY mcp/http-launch.sh /usr/local/bin/ai-sandbox-mcp-http-launch
+COPY mcp/http-start.sh /usr/local/bin/ai-sandbox-mcp-http-start
+COPY mcp/http-status.sh /usr/local/bin/ai-sandbox-mcp-http-status
+COPY mcp/http-stop.sh /usr/local/bin/ai-sandbox-mcp-http-stop
+COPY mcp/cloudflare-install.sh /usr/local/bin/ai-sandbox-mcp-cloudflare-install
+COPY mcp/cloudflare-start.sh /usr/local/bin/ai-sandbox-mcp-cloudflare-start
+COPY mcp/cloudflare-status.sh /usr/local/bin/ai-sandbox-mcp-cloudflare-status
+COPY mcp/cloudflare-stop.sh /usr/local/bin/ai-sandbox-mcp-cloudflare-stop
 COPY mcp/tunnel-install.sh /usr/local/bin/ai-sandbox-mcp-tunnel-install
 COPY mcp/tunnel-start.sh /usr/local/bin/ai-sandbox-mcp-tunnel-start
 COPY mcp/tunnel-status.sh /usr/local/bin/ai-sandbox-mcp-tunnel-status
@@ -130,6 +138,14 @@ RUN chmod +x \
     /usr/local/bin/ai-sandbox-default-install \
     /usr/local/bin/ai-sandbox-mcp-install \
     /usr/local/bin/ai-sandbox-mcp-launch \
+    /usr/local/bin/ai-sandbox-mcp-http-launch \
+    /usr/local/bin/ai-sandbox-mcp-http-start \
+    /usr/local/bin/ai-sandbox-mcp-http-status \
+    /usr/local/bin/ai-sandbox-mcp-http-stop \
+    /usr/local/bin/ai-sandbox-mcp-cloudflare-install \
+    /usr/local/bin/ai-sandbox-mcp-cloudflare-start \
+    /usr/local/bin/ai-sandbox-mcp-cloudflare-status \
+    /usr/local/bin/ai-sandbox-mcp-cloudflare-stop \
     /usr/local/bin/ai-sandbox-mcp-tunnel-install \
     /usr/local/bin/ai-sandbox-mcp-tunnel-start \
     /usr/local/bin/ai-sandbox-mcp-tunnel-status \

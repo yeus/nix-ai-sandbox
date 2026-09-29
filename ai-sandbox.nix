@@ -32,6 +32,7 @@ let
     export AI_SANDBOX_IMAGE=${lib.escapeShellArg cfg.imageName}
     export AI_SANDBOX_HOME_STORAGE=${lib.escapeShellArg cfg.homeStorage}
     export AI_SANDBOX_NIX_STORAGE=${lib.escapeShellArg cfg.nixStorage}
+    export AI_SANDBOX_SECRETS_STORAGE=${lib.escapeShellArg cfg.secretsStorage}
     export AI_SANDBOX_BUILD_CONTEXT=${lib.escapeShellArg aiSandboxFiles}
     export AI_SANDBOX_STATE_DIR=${lib.escapeShellArg cfg.stateDir}
     export AI_SANDBOX_NETWORK_MODE=${lib.escapeShellArg cfg.networkMode}
@@ -153,6 +154,12 @@ in
       type = lib.types.str;
       default = "${config.home.homeDirectory}/.cache/ai-sandbox/nix";
       description = "Absolute host path (preferred) or Podman volume name for sandbox /nix storage.";
+    };
+
+    secretsStorage = lib.mkOption {
+      type = lib.types.str;
+      default = "${config.home.homeDirectory}/.cache/ai-sandbox/secrets";
+      description = "Absolute host-only path for persistent MCP credentials; never mounted into sandbox containers.";
     };
 
     stateDir = lib.mkOption {

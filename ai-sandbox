@@ -4,6 +4,7 @@ set -euo pipefail
 IMAGE="${AI_SANDBOX_IMAGE:-ai-sandbox-vscode}"
 HOME_STORAGE="${AI_SANDBOX_HOME_STORAGE:-${AI_SANDBOX_HOME_VOLUME:-$HOME/.cache/ai-sandbox/home}}"
 NIX_STORAGE="${AI_SANDBOX_NIX_STORAGE:-${AI_SANDBOX_NIX_VOLUME:-$HOME/.cache/ai-sandbox/nix}}"
+SECRETS_STORAGE="${AI_SANDBOX_SECRETS_STORAGE:-$HOME/.cache/ai-sandbox/secrets}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_CONTEXT="${AI_SANDBOX_BUILD_CONTEXT:-$SCRIPT_DIR}"
 STATE_DIR="${AI_SANDBOX_STATE_DIR:-$HOME/.local/state/ai-sandbox}"
@@ -31,14 +32,19 @@ Usage:
   ai-sandbox serve [WORKSPACE] [--instance NAME] --stop
     Start or stop browser-based code-server on a stable loopback port.
 
-  ai-sandbox mcp [WORKSPACE] --tunnel [TUNNEL_ID] [--network bridge|host] [--detach]
-  ai-sandbox mcp [WORKSPACE] --tunnel [--android|--emulator] [--android-gpu]
+  ai-sandbox mcp [WORKSPACE] --tunnel [TUNNEL_ID] [--connection NAME] [--network bridge|host] [--detach]
+  ai-sandbox mcp [WORKSPACE] --tunnel [--connection NAME] [--android|--emulator] [--android-gpu]
+  ai-sandbox mcp [WORKSPACE] --local [--connection NAME] [--port PORT]
+  ai-sandbox mcp [WORKSPACE] --publish cloudflare [--connection NAME] [--public-url HTTPS_URL]
+  ai-sandbox mcp [WORKSPACE] --publish cloudflare-quick [--connection NAME]
+  ai-sandbox mcp [WORKSPACE] --show-key|--show-token
   ai-sandbox mcp [WORKSPACE] --status [--json]
   ai-sandbox mcp [WORKSPACE] --stop [--json]
   ai-sandbox mcp [WORKSPACE] --sessions
   ai-sandbox mcp [WORKSPACE] --attach THREAD_ID
     Start, inspect, or stop Winx MCP with sandboxed Bash access.
-    Private networking is the default; --network host opts into host services.
+    HTTP modes use a persistent per-workspace bearer API key stored only on the host.
+    Cloudflare named tunnels are stable; cloudflare-quick URLs are temporary.
 
   ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--android|--emulator|--android-emulator] [--android-gpu] [-- COMMAND [ARGS...]]
     Start/attach the sandbox and open an interactive shell (or run command after --).
@@ -704,32 +710,37 @@ port_is_listening() {
 port_is_assigned_elsewhere() {
   local port="$1"
   local own_file="$2"
-  local file
-  [[ -d "$STATE_DIR/code-server-ports" ]] || return 1
-  for file in "$STATE_DIR"/code-server-ports/*; do
+  local port_dir file
+  port_dir="$(dirname "$own_file")"
+  [[ -d "$port_dir" ]] || return 1
+  for file in "$port_dir"/*; do
     [[ -f "$file" && "$file" != "$own_file" ]] || continue
     [[ "$(<"$file")" == "$port" ]] && return 0
   done
   return 1
 }
 
-resolve_code_server_port() {
-  local hash="$1"
-  local instance="$2"
+resolve_stable_port() {
+  local namespace="$1"
+  local key="$2"
   local container="$3"
   local requested="$4"
-  local port_dir="$STATE_DIR/code-server-ports"
-  local assignment="$port_dir/${hash}-${instance}"
-  local existing_state stored candidate start offset
+  local first_port="$5"
+  local port_count="$6"
+  local label="$7"
+  local port_dir="$STATE_DIR/$namespace"
+  local assignment="$port_dir/$key"
+  local existing_state stored candidate start offset last_port
   mkdir -p "$port_dir"
   stored=""
   [[ -f "$assignment" ]] && stored="$(<"$assignment")"
   existing_state="$(podman inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)"
+  last_port=$((first_port + port_count - 1))
 
   if [[ -n "$requested" ]]; then
     if [[ -n "$stored" && "$stored" != "$requested" ]]; then
-      [[ "$existing_state" != "running" ]] ||
-        { echo "Stop the code-server before changing its port." >&2; return 1; }
+      [[ "$existing_state" != running ]] ||
+        { echo "Stop $label before changing its port." >&2; return 1; }
       if [[ -n "$existing_state" ]]; then
         podman rm "$container" >/dev/null
         existing_state=""
@@ -739,30 +750,45 @@ resolve_code_server_port() {
   elif [[ -n "$stored" ]]; then
     candidate="$stored"
   else
-    start=$((18080 + 16#${hash:0:6} % 920))
+    start=$((first_port + 16#${key:0:6} % port_count))
     candidate=""
-    for ((offset = 0; offset < 920; offset++)); do
-      local probe=$((18080 + (start - 18080 + offset) % 920))
-      if ! port_is_assigned_elsewhere "$probe" "$assignment" && ! port_is_listening "$probe"; then
+    for ((offset = 0; offset < port_count; offset++)); do
+      local probe=$((first_port + (start - first_port + offset) % port_count))
+      if ! port_is_assigned_elsewhere "$probe" "$assignment" &&
+        ! port_is_listening "$probe"; then
         candidate="$probe"
         break
       fi
     done
-    [[ -n "$candidate" ]] ||
-      { echo "No free code-server port found in 18080-18999." >&2; return 1; }
+    [[ -n "$candidate" ]] || {
+      echo "No free $label port found in $first_port-$last_port." >&2
+      return 1
+    }
   fi
 
   if port_is_assigned_elsewhere "$candidate" "$assignment"; then
-    echo "Code-server port $candidate is assigned to another workspace." >&2
+    echo "$label port $candidate is assigned to another workspace." >&2
     return 1
   fi
-  if [[ "$existing_state" != "running" ]] && port_is_listening "$candidate"; then
-    echo "Code-server port $candidate is already in use." >&2
+  if [[ "$existing_state" != running ]] && port_is_listening "$candidate"; then
+    echo "$label port $candidate is already in use." >&2
     return 1
   fi
 
   printf '%s\n' "$candidate" >"$assignment"
   printf '%s\n' "$candidate"
+}
+
+resolve_code_server_port() {
+  resolve_stable_port \
+    code-server-ports "$1-$2" "$3" "$4" \
+    18080 920 "code-server"
+}
+
+resolve_mcp_port() {
+  resolve_stable_port \
+    mcp-ports "$1" "$2" "$3" \
+    19000 1000 "MCP"
 }
 
 pick_auto_instance_name() {
@@ -963,10 +989,17 @@ mcp_status=0
 mcp_stop=0
 mcp_json=0
 mcp_port=""
+mcp_host_port=""
 mcp_local_selected=0
 mcp_tunnel_selected=0
 mcp_tunnel_id=""
 mcp_runtime_api_key=""
+mcp_publish=""
+mcp_public_url=""
+mcp_http_token=""
+mcp_cloudflare_token=""
+mcp_connection=""
+mcp_show_token=0
 mcp_detach=0
 mcp_sessions=0
 mcp_attach_id=""
@@ -1164,6 +1197,32 @@ while [[ $# -gt 0 ]]; do
       mcp_local_selected=1
       shift
       ;;
+    --publish)
+      [[ "$cmd" == "mcp" ]] || { echo "--publish is only valid with mcp" >&2; exit 1; }
+      shift
+      [[ $# -gt 0 ]] || { echo "--publish requires cloudflare or cloudflare-quick" >&2; exit 1; }
+      mcp_publish="$1"
+      shift
+      ;;
+    --public-url)
+      [[ "$cmd" == "mcp" ]] || { echo "--public-url is only valid with mcp" >&2; exit 1; }
+      shift
+      [[ $# -gt 0 ]] || { echo "--public-url requires an HTTPS URL" >&2; exit 1; }
+      mcp_public_url="$1"
+      shift
+      ;;
+    --connection)
+      [[ "$cmd" == "mcp" ]] || { echo "--connection is only valid with mcp" >&2; exit 1; }
+      shift
+      [[ $# -gt 0 ]] || { echo "--connection requires a name" >&2; exit 1; }
+      mcp_connection="$1"
+      shift
+      ;;
+    --show-key|--show-token)
+      [[ "$cmd" == "mcp" ]] || { echo "$1 is only valid with mcp" >&2; exit 1; }
+      mcp_show_token=1
+      shift
+      ;;
     --tunnel)
       [[ "$cmd" == "mcp" ]] || { echo "--tunnel is only valid with mcp" >&2; exit 1; }
       mcp_tunnel_selected=1
@@ -1313,8 +1372,35 @@ if [[ -n "$mcp_port" ]] && { ! [[ "$mcp_port" =~ ^[0-9]+$ ]] || [[ "$mcp_port" -
   exit 1
 fi
 
-if [[ "$mcp_local_selected" -eq 1 && "$mcp_tunnel_selected" -eq 1 ]]; then
-  echo "mcp --local and --tunnel are mutually exclusive." >&2
+mcp_transport_count=$((mcp_local_selected + mcp_tunnel_selected))
+[[ -z "$mcp_publish" ]] || mcp_transport_count=$((mcp_transport_count + 1))
+if [[ "$mcp_transport_count" -gt 1 ]]; then
+  echo "mcp --local, --tunnel, and --publish are mutually exclusive." >&2
+  exit 1
+fi
+
+case "$mcp_publish" in
+  ""|cloudflare|cloudflare-quick) ;;
+  *)
+    echo "Invalid MCP publisher: $mcp_publish (expected cloudflare or cloudflare-quick)" >&2
+    exit 1
+    ;;
+esac
+
+if [[ -n "$mcp_port" && "$mcp_local_selected" -ne 1 ]]; then
+  echo "mcp --port requires --local." >&2
+  exit 1
+fi
+if [[ -n "$mcp_public_url" && "$mcp_publish" != cloudflare ]]; then
+  echo "mcp --public-url requires --publish cloudflare." >&2
+  exit 1
+fi
+if [[ -n "$mcp_connection" && ! "$mcp_connection" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$ ]]; then
+  echo "Invalid MCP connection name: $mcp_connection (expected 1-32 letters, digits, ., _, or -)." >&2
+  exit 1
+fi
+if [[ -n "$mcp_connection" && "$mcp_transport_count" -eq 0 ]]; then
+  echo "mcp --connection requires --local, --tunnel, or --publish." >&2
   exit 1
 fi
 
@@ -1329,23 +1415,35 @@ if [[ "$mcp_status" -eq 1 && "$mcp_stop" -eq 1 ]]; then
 fi
 
 if [[ "$mcp_detach" -eq 1 && "$mcp_tunnel_selected" -ne 1 ]]; then
-  echo "mcp --detach requires --tunnel." >&2
+  echo "mcp --detach is retained for the OpenAI --tunnel transport only." >&2
+  exit 1
+fi
+
+if [[ "$mcp_show_token" -eq 1 ]] &&
+  { [[ "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 || "$mcp_sessions" -eq 1 ||
+       -n "$mcp_attach_id" || "$mcp_transport_count" -ne 0 ||
+       "$mcp_json" -eq 1 || "$mcp_mode_selected" -eq 1 ||
+       "$network_selected" -eq 1 || -n "$mcp_port" || -n "$mcp_public_url" ||
+       -n "$mcp_connection" ]]; }; then
+  echo "mcp --show-key/--show-token cannot be combined with other MCP operations or start options." >&2
   exit 1
 fi
 
 if [[ "$cmd" == mcp && ( "$mcp_sessions" -eq 1 || -n "$mcp_attach_id" ) ]] &&
   { [[ "$mcp_sessions" -eq 1 && -n "$mcp_attach_id" ]] ||
-    [[ "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 || "$mcp_tunnel_selected" -eq 1 ||
+    [[ "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 || "$mcp_transport_count" -ne 0 ||
        "$mcp_detach" -eq 1 || "$mcp_json" -eq 1 || "$mcp_mode_selected" -eq 1 ||
-       "$network_selected" -eq 1 ]]; }; then
+       "$network_selected" -eq 1 || -n "$mcp_port" || -n "$mcp_public_url" ||
+       -n "$mcp_connection" ]]; }; then
   echo "MCP session commands cannot be combined with start, status, or stop options." >&2
   exit 1
 fi
 
 if [[ "$cmd" == "mcp" && ( "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 ) ]] &&
   { [[ "$mcp_mode_selected" -eq 1 ]] || [[ -n "$mcp_port" ]] ||
-    [[ "$mcp_local_selected" -eq 1 ]] || [[ "$mcp_tunnel_selected" -eq 1 ]] ||
-    [[ "$mcp_detach" -eq 1 ]] || [[ "$network_selected" -eq 1 ]]; }; then
+    [[ "$mcp_transport_count" -ne 0 ]] || [[ "$mcp_detach" -eq 1 ]] ||
+     [[ "$network_selected" -eq 1 ]] || [[ -n "$mcp_public_url" ]] ||
+     [[ "$mcp_show_token" -eq 1 ]] || [[ -n "$mcp_connection" ]]; }; then
   echo "MCP start options cannot be combined with --status or --stop." >&2
   exit 1
 fi
@@ -1367,27 +1465,37 @@ if [[ "$cmd" == "serve" && "$NETWORK_MODE" != "host" ]]; then
 fi
 
 if [[ "$cmd" == "mcp" ]]; then
-  mcp_expected_network=bridge
-  if [[ "$android_mode" -eq 1 ]]; then
-    mcp_expected_network=host
-    if [[ "$network_selected" -eq 1 && "$NETWORK_MODE" != host ]]; then
-      echo "MCP Android modes require host networking." >&2
+  if [[ "$mcp_local_selected" -eq 1 || -n "$mcp_publish" ]]; then
+    if [[ "$android_mode" -eq 1 ]]; then
+      echo "HTTP MCP publishing cannot be combined with Android host networking." >&2
       exit 1
     fi
-  elif [[ "$network_selected" -eq 1 ]]; then
-    mcp_expected_network="$NETWORK_MODE"
+    if [[ "$network_selected" -eq 1 && "$NETWORK_MODE" != bridge ]]; then
+      echo "HTTP MCP modes require isolated bridge/private networking." >&2
+      exit 1
+    fi
+    NETWORK_MODE=bridge
+  else
+    mcp_expected_network=bridge
+    if [[ "$android_mode" -eq 1 ]]; then
+      mcp_expected_network=host
+      if [[ "$network_selected" -eq 1 && "$NETWORK_MODE" != host ]]; then
+        echo "MCP Android modes require host networking." >&2
+        exit 1
+      fi
+    elif [[ "$network_selected" -eq 1 ]]; then
+      mcp_expected_network="$NETWORK_MODE"
+    fi
+    NETWORK_MODE="$mcp_expected_network"
   fi
-  NETWORK_MODE="$mcp_expected_network"
-  if [[ -n "$mcp_port" || "$mcp_local_selected" -eq 1 ]]; then
-    echo "MCP uses stdio through Secure Tunnel; --port and --local are unavailable." >&2
-    exit 1
-  fi
+
   if [[ "$mcp_mode_selected" -eq 1 ]]; then
-    echo "Winx stdio exposes Bash; --read-only and --ship are unavailable." >&2
+    echo "Winx Bash modes --read-only and --ship are unavailable through ais mcp." >&2
     exit 1
   fi
-  if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 && "$mcp_sessions" -eq 0 && -z "$mcp_attach_id" && "$mcp_tunnel_selected" -eq 0 ]]; then
-    echo "Start Winx MCP with: ais mcp --tunnel" >&2
+  if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 && "$mcp_sessions" -eq 0 &&
+    -z "$mcp_attach_id" && "$mcp_show_token" -eq 0 && "$mcp_transport_count" -eq 0 ]]; then
+    echo "Start Winx MCP with --local, --publish cloudflare, or --tunnel." >&2
     exit 1
   fi
 fi
@@ -1661,7 +1769,8 @@ case "$cmd" in
     ;;
   mcp)
     if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 &&
-      "$mcp_sessions" -eq 0 && -z "$mcp_attach_id" ]]; then
+      "$mcp_sessions" -eq 0 && -z "$mcp_attach_id" &&
+      "$mcp_show_token" -eq 0 ]]; then
       ensure_image_exists
     fi
     ;;
@@ -1735,6 +1844,41 @@ if [[ -n "${flake_arg:-}" ]]; then
 fi
 
 workspace_hash="$(echo -n "$workspace" | sha256sum | cut -c1-12)"
+
+if [[ "$cmd" == mcp &&
+  ( "$mcp_show_token" -eq 1 || "$mcp_transport_count" -ne 0 ) ]]; then
+  mcp_prepare_secret_dir "$workspace_hash"
+  mcp_secret_lock="$(mcp_secret_workspace_dir "$workspace_hash")/.lock"
+  [[ ! -L "$mcp_secret_lock" ]] || {
+    echo "Refusing symlinked MCP credential lock." >&2
+    exit 1
+  }
+  exec {mcp_secret_lock_fd}>"$mcp_secret_lock"
+  chmod 0600 "$mcp_secret_lock"
+  if ! flock -w 2 "$mcp_secret_lock_fd"; then
+    echo "Another MCP credential operation is already in progress for this workspace." >&2
+    exit 1
+  fi
+  mcp_resolve_connection_name "$workspace_hash" "$mcp_connection" mcp_connection
+
+
+  if [[ "$mcp_show_token" -eq 1 ]]; then
+    mcp_print_http_token "$workspace_hash"
+    flock -u "$mcp_secret_lock_fd"
+    exec {mcp_secret_lock_fd}>&-
+    exit 0
+  fi
+
+  mcp_resolve_http_token "$workspace_hash" mcp_http_token
+  if [[ "$mcp_publish" == cloudflare ]]; then
+    mcp_resolve_cloudflare_named_config \
+      "$workspace_hash" "$mcp_public_url" \
+      mcp_cloudflare_token mcp_public_url
+  fi
+  flock -u "$mcp_secret_lock_fd"
+  exec {mcp_secret_lock_fd}>&-
+fi
+
 project_slug="$(sanitize_container_name_part "$project_name" "workspace")"
 launch_context="vscode"
 if [[ "$cmd" == "shell" || "$cmd" == "warm" || "$cmd" == "exec" ]]; then
@@ -1851,6 +1995,9 @@ code_server_port=""
 if [[ "$cmd" == "serve" ]]; then
   code_server_port="$(resolve_code_server_port "$workspace_hash" "$instance_arg" "$container_name" "$server_port")"
 fi
+if [[ "$cmd" == mcp && "$mcp_local_selected" -eq 1 ]]; then
+  mcp_host_port="$(resolve_mcp_port "$workspace_hash" "$container_name" "$mcp_port")"
+fi
 
 if [[ "$cmd" != "mcp" ]]; then
   echo "$container_name" > "$STATE_DIR/last-container"
@@ -1946,6 +2093,13 @@ if [[ "$emulator_mode" -eq 1 ]]; then
   fi
 fi
 
+mcp_port_args=()
+if [[ "$cmd" == mcp && "$mcp_local_selected" -eq 1 ]]; then
+  mcp_port_args=(
+    -p "127.0.0.1:$mcp_host_port:$AI_SANDBOX_MCP_HTTP_PORT"
+  )
+fi
+
 common_args=(
   --name "$container_name"
   --init
@@ -1979,6 +2133,7 @@ common_args=(
   -v "$home_mount_spec"
   -v "$nix_mount_spec"
   -v "$tmp_host_dir:/tmp${selinux_label_opt}"
+  "${mcp_port_args[@]}"
   "${mcp_mount_args[@]}"
   "${android_args[@]}"
   "${emulator_device_args[@]}"
@@ -2136,15 +2291,27 @@ mcp_require_network_mode() {
 }
 
 run_mcp() {
-  local existing_state actual_network expected_network runtime_dir lock_file tunnel_json existing_mode existing_version legacy_container recorded_id new_tunnel=0
+  local existing_state actual_network expected_network runtime_dir lock_file
+  local existing_mode existing_version existing_transport existing_publisher
+  local legacy_container recorded_id requested_transport requested_publisher
+  local tunnel_json http_json publish_json allowed_host new_tunnel=0
+
   runtime_dir="$(mcp_runtime_host_dir "$workspace_hash")"
   lock_file="$runtime_dir/runtime/lock"
   mkdir -p "$(dirname "$lock_file")"
   exec 8>"$lock_file"
   if ! flock -w 2 8; then
     echo "Another MCP operation is already in progress for this workspace." >&2
-    echo "Wait for it to finish, or stop the stuck process before retrying." >&2
     return 1
+  fi
+
+  requested_transport=openai-tunnel
+  requested_publisher=""
+  if [[ "$mcp_local_selected" -eq 1 ]]; then
+    requested_transport=streamable-http
+  elif [[ -n "$mcp_publish" ]]; then
+    requested_transport=streamable-http
+    requested_publisher="$mcp_publish"
   fi
 
   expected_network="$NETWORK_MODE"
@@ -2155,18 +2322,59 @@ run_mcp() {
 
   legacy_container="ai-sandbox-${project_slug}-workspace-${workspace_hash}-default"
   existing_state="$(podman inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
-  if [[ "$mcp_reuse_emulator" -eq 1 ]]; then
-    if [[ "$existing_state" != "running" ]]; then
-      echo "The emulator-enabled container is no longer running: $container_name" >&2
-      return 1
+
+  if [[ "$mcp_reuse_emulator" -eq 1 && "$existing_state" != running ]]; then
+    echo "The emulator-enabled container is no longer running: $container_name" >&2
+    return 1
+  fi
+
+  existing_transport="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" transport)"
+  existing_publisher="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" publisher)"
+  existing_mode="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" mode)"
+  existing_version="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" version)"
+
+  if [[ "$existing_state" == running && -n "$existing_transport" &&
+    "$existing_transport" != "$requested_transport" ]]; then
+    echo "MCP is already running with transport=$existing_transport." >&2
+    echo "Stop it before changing transports." >&2
+    return 1
+  fi
+  if [[ "$existing_state" == running && "$requested_transport" == streamable-http &&
+    "$existing_publisher" != "$requested_publisher" ]]; then
+    echo "MCP is already running with publisher=${existing_publisher:-local}." >&2
+    echo "Stop it before changing publishers." >&2
+    return 1
+  fi
+  if [[ "$existing_state" == running && -n "$existing_version" &&
+    "$existing_version" != "$AI_SANDBOX_MCP_VERSION" ]]; then
+    echo "MCP is running Winx $existing_version; stop it before upgrading." >&2
+    return 1
+  fi
+  if [[ "$existing_state" == running && -n "$existing_mode" &&
+    "$existing_mode" != "$mcp_mode" ]]; then
+    echo "MCP is already running with mode=$existing_mode." >&2
+    return 1
+  fi
+
+  if [[ "$requested_transport" == streamable-http && "$existing_state" == running ]]; then
+    http_json="$(mcp_http_status_json \
+      "$container_name" "$runtime_dir" \
+      "$(mcp_runtime_container_dir "$workspace_hash" "$mcp_reuse_emulator")")"
+    publish_json="$(mcp_cloudflare_status_json \
+      "$container_name" "$runtime_dir" \
+      "$(mcp_runtime_container_dir "$workspace_hash" "$mcp_reuse_emulator")")"
+    if [[ "$(jq -r '.process_running' <<<"$http_json")" == true &&
+      ( -z "$requested_publisher" || "$(jq -r '.process_running' <<<"$publish_json")" == true ) ]]; then
+      echo "MCP HTTP server is already running for this workspace." >&2
+      mcp_emit_status "$workspace" "$container_name" "$workspace_hash" "$mcp_json"
+      return 0
     fi
   fi
-  if [[ -n "$existing_state" ]]; then
-    actual_network="$(podman inspect -f '{{.HostConfig.NetworkMode}}' "$container_name")"
-    if ! mcp_require_network_mode \
-      "$container_name" "$workspace" "$expected_network" "$actual_network"; then
-      return 1
-    fi
+
+  if [[ -n "$existing_state" && "$existing_state" != running &&
+    "$mcp_reuse_emulator" -eq 0 ]]; then
+    podman rm "$container_name" >/dev/null
+    existing_state=""
   fi
 
   if [[ "$mcp_reuse_emulator" -eq 1 ]]; then
@@ -2176,11 +2384,8 @@ run_mcp() {
       return 1
     fi
     echo "Reusing emulator-enabled sandbox container $container_name..." >&2
-  elif [[ "$existing_state" == "running" ]]; then
+  elif [[ "$existing_state" == running ]]; then
     echo "Reusing sandbox workspace container $container_name..." >&2
-  elif [[ -n "$existing_state" ]]; then
-    echo "Starting sandbox workspace container $container_name..." >&2
-    podman start "$container_name" >/dev/null
   else
     echo "Creating sandbox workspace container $container_name..." >&2
     podman run -d \
@@ -2194,53 +2399,106 @@ run_mcp() {
     "$container_name" "$workspace" "$expected_network" "$actual_network"; then
     return 1
   fi
-  tunnel_json="$(mcp_tunnel_status_json \
-    "$container_name" "$runtime_dir" \
-    "$(mcp_runtime_container_dir "$workspace_hash" "$mcp_reuse_emulator")")"
-  existing_mode="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" mode)"
-  existing_version="$(mcp_read_metadata_field "$runtime_dir/runtime/metadata.json" version)"
-  if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" == true &&
-    -n "$existing_version" && "$existing_version" != "$AI_SANDBOX_MCP_VERSION" ]]; then
-    echo "MCP is running Winx $existing_version; stop it before upgrading." >&2
-    return 1
-  fi
-  if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" == true &&
-    -n "$existing_mode" && "$existing_mode" != "$mcp_mode" ]]; then
-    echo "MCP is already running with mode=$existing_mode." >&2
-    echo "Stop it before changing mode." >&2
-    return 1
-  fi
-  if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" != true ]]; then
-    new_tunnel=1
-    trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 130' INT
-    trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 143' TERM
-    trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 129' HUP
-  fi
-  if ! mcp_start_tunnel \
-    "$container_name" "$workspace_hash" \
-    "$mcp_tunnel_id" "$mcp_runtime_api_key" \
-    "$legacy_container"; then
+
+  if [[ "$requested_transport" == openai-tunnel ]]; then
+    tunnel_json="$(mcp_tunnel_status_json \
+      "$container_name" "$runtime_dir" \
+      "$(mcp_runtime_container_dir "$workspace_hash" "$mcp_reuse_emulator")")"
+    if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" != true ]]; then
+      new_tunnel=1
+      trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 130' INT
+      trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 143' TERM
+      trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 129' HUP
+    fi
+    if ! mcp_start_tunnel \
+      "$container_name" "$workspace_hash" \
+      "$mcp_tunnel_id" "$mcp_runtime_api_key" \
+      "$legacy_container"; then
+      trap - INT TERM HUP
+      [[ "$new_tunnel" -eq 0 ]] ||
+        mcp_stop_process "$container_name" "$workspace_hash" 1 || true
+      return 1
+    fi
+    mcp_write_metadata \
+      "$runtime_dir/runtime/metadata.json" \
+      "$(mcp_container_id "$container_name")" "$mcp_mode" \
+      "$container_name" "$mcp_reuse_emulator" "$runtime_profile" \
+      openai-tunnel
+    if ! mcp_store_tunnel_credentials \
+      "$mcp_tunnel_id" "$mcp_runtime_api_key"; then
+      trap - INT TERM HUP
+      [[ "$new_tunnel" -eq 0 ]] ||
+        mcp_stop_process "$container_name" "$workspace_hash" 1 || true
+      return 1
+    fi
+    mcp_runtime_api_key=""
+    mcp_emit_status "$workspace" "$container_name" "$workspace_hash" "$mcp_json"
+    if [[ "$mcp_detach" -eq 0 ]]; then
+      flock -u 8
+      mcp_supervise_tunnel "$container_name" "$workspace_hash"
+    fi
     trap - INT TERM HUP
-    [[ "$new_tunnel" -eq 0 ]] || mcp_stop_process "$container_name" "$workspace_hash" 1 || true
-    return 1
+    return
   fi
+
+  if [[ "$mcp_local_selected" -eq 1 ]]; then
+    if ! mcp_start_http \
+      "$container_name" "$workspace_hash" "$mcp_http_token" \
+      0.0.0.0 ""; then
+      mcp_stop_process "$container_name" "$workspace_hash" 1 || true
+      return 1
+    fi
+    mcp_write_metadata \
+      "$runtime_dir/runtime/metadata.json" \
+      "$(mcp_container_id "$container_name")" "$mcp_mode" \
+      "$container_name" 0 "$runtime_profile" streamable-http "" \
+      "$mcp_host_port" ""
+    mcp_http_token=""
+    mcp_emit_status "$workspace" "$container_name" "$workspace_hash" "$mcp_json"
+    return
+  fi
+
+  if [[ "$mcp_publish" == cloudflare-quick ]]; then
+    if ! mcp_start_cloudflare \
+      "$container_name" "$workspace_hash" quick "" ""; then
+      mcp_stop_process "$container_name" "$workspace_hash" 1 || true
+      return 1
+    fi
+    publish_json="$(mcp_cloudflare_status_json \
+      "$container_name" "$runtime_dir" \
+      "$(mcp_runtime_container_dir "$workspace_hash" 0)")"
+    mcp_public_url="$(jq -r '.public_url // empty' <<<"$publish_json")"
+    allowed_host="$(mcp_public_host "$mcp_public_url")"
+    if ! mcp_start_http \
+      "$container_name" "$workspace_hash" "$mcp_http_token" \
+      127.0.0.1 "$allowed_host"; then
+      mcp_stop_process "$container_name" "$workspace_hash" 1 || true
+      return 1
+    fi
+  else
+    allowed_host="$(mcp_public_host "$mcp_public_url")"
+    if ! mcp_start_http \
+      "$container_name" "$workspace_hash" "$mcp_http_token" \
+      127.0.0.1 "$allowed_host"; then
+      mcp_stop_process "$container_name" "$workspace_hash" 1 || true
+      return 1
+    fi
+    if ! mcp_start_cloudflare \
+      "$container_name" "$workspace_hash" named \
+      "$mcp_public_url" "$mcp_cloudflare_token"; then
+      mcp_stop_process "$container_name" "$workspace_hash" 1 || true
+      return 1
+    fi
+  fi
+
   mcp_write_metadata \
     "$runtime_dir/runtime/metadata.json" \
     "$(mcp_container_id "$container_name")" "$mcp_mode" \
-    "$container_name" "$mcp_reuse_emulator" "$runtime_profile"
-  if ! mcp_store_tunnel_credentials \
-    "$mcp_tunnel_id" "$mcp_runtime_api_key"; then
-    trap - INT TERM HUP
-    [[ "$new_tunnel" -eq 0 ]] || mcp_stop_process "$container_name" "$workspace_hash" 1 || true
-    return 1
-  fi
-  mcp_runtime_api_key=""
+    "$container_name" 0 "$runtime_profile" streamable-http \
+    "$mcp_publish" "" "$mcp_public_url"
+  mcp_http_token=""
+  mcp_cloudflare_token=""
   mcp_emit_status "$workspace" "$container_name" "$workspace_hash" "$mcp_json"
-  if [[ "$mcp_tunnel_selected" -eq 1 && "$mcp_detach" -eq 0 ]]; then
-    flock -u 8
-    mcp_supervise_tunnel "$container_name" "$workspace_hash"
-  fi
-  trap - INT TERM HUP
 }
 
 run_install() {

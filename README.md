@@ -72,10 +72,11 @@ Code in that repository's sandbox. For a disposable interactive shell, use
 `ais shell .`. Both commands use the current directory as the workspace; pass
 a different directory explicitly when needed.
 
-The ChatGPT connection is separate from the editor container. Run
-`ais mcp --tunnel` to start a dedicated MCP container for the same workspace.
-You do not need to start VS Code first. The MCP container can read and write
-the mounted repository and execute commands in its own sandbox shell.
+The MCP connection is separate from the editor container. Use `ais mcp --local`
+for loopback Streamable HTTP, `ais mcp --publish cloudflare` for a stable
+outbound HTTPS endpoint behind NAT, or keep using `ais mcp --tunnel` for the
+OpenAI Secure MCP Tunnel. Each mode starts a dedicated MCP container for the
+same workspace; VS Code does not need to be running.
 
 ## Why this differs from Dev Containers
 
@@ -276,7 +277,145 @@ profiles because code-server extension compatibility differs. Repository
 
 ## Workspace MCP
 
-### First-time connection to ChatGPT
+### Transport choices
+
+`ais mcp` supports three independent transports. Only one may run for a
+workspace at a time:
+
+- `ais mcp --tunnel` keeps the existing OpenAI Secure MCP Tunnel over stdio.
+- `ais mcp --local` exposes native Winx Streamable HTTP only on host loopback.
+- `ais mcp --publish cloudflare` exposes Streamable HTTP through a stable
+  remotely managed Cloudflare tunnel. `cloudflare-quick` is available only as
+  a temporary development shortcut.
+
+### Persistent connection identities
+
+The first MCP workspace registered on a host is assigned `mcp1`, the next
+`mcp2`, and so on. The connection identity is stored in the same host-only MCP
+state as its credentials and survives container restarts:
+
+```text
+Connection: mcp1
+Endpoint:   ...
+```
+
+You can choose the name on first start instead:
+
+```bash
+ais mcp --local --connection taskyon
+ais mcp --publish cloudflare --connection joulios
+```
+
+Connection names are unique across the host secret store and cannot silently
+move between workspaces. A later start from the same workspace reuses the saved
+identity even when `--connection` is omitted.
+
+The identity is separate from the transport. Local HTTP also reuses its stable
+host port, while a named Cloudflare publisher reuses its persisted public URL
+and tunnel credentials. This is the register-once path for remote services:
+`mcp1`, `mcp2`, or a custom connection name continues to identify the same
+workspace endpoint after `ais mcp --stop` and a later restart. Quick Tunnels are
+the explicit exception because Cloudflare assigns a new temporary hostname.
+
+
+HTTP modes use a persistent per-workspace bearer API key. Show it with:
+
+```bash
+ais mcp --show-key
+```
+
+Configure a compatible MCP client with the printed endpoint and:
+
+```text
+Authorization: Bearer <api-key>
+```
+
+
+This is static bearer authentication rather than OAuth. It works with MCP
+clients that let you supply an authorization token or HTTP credential. For
+example the OpenAI Agents API supports reusable HTTP credentials and the
+Anthropic Messages API accepts an MCP `authorization_token`. ChatGPT custom
+apps currently do not accept a caller-provided API key for authenticated MCP
+apps; keep using `ais mcp --tunnel` for that ChatGPT path unless an OAuth-capable
+edge is added later.
+The key is generated once and stored by default under
+`~/.cache/ai-sandbox/secrets/mcp/<workspace-hash>/bearer-token`. Override the
+root with `AI_SANDBOX_SECRETS_STORAGE` or the Home Manager option
+`programs.ai-sandbox.secretsStorage`. This directory is host-only: it is not
+mounted into the MCP container and is deliberately separate from the sandbox
+home and Nix stores. The key survives MCP container replacement and
+`reset-storage`; rotate it by stopping MCP and replacing or removing that
+workspace token file.
+
+Winx receives the key through a temporary `0600` token file at startup. Winx
+loads the credential before accepting requests and the temporary copy is then
+deleted, so the connected AI cannot recover its own server credential through
+Bash. Tokens are never passed as process arguments or URL query parameters.
+
+### Local HTTP
+
+Start a loopback-only endpoint:
+
+```bash
+ais mcp --local
+```
+
+`ais` assigns a stable free host port per workspace and prints the resulting
+`http://127.0.0.1:<port>/mcp` URL. An explicit port is also supported:
+
+```bash
+ais mcp --local --port 19123
+```
+
+The Winx listener runs inside the isolated MCP network namespace and Podman
+publishes it only to host `127.0.0.1`. HTTP MCP intentionally rejects host
+networking. Different workspaces have separate containers, API keys, runtime
+state, and host ports, so multiple workspace MCPs can run on the same machine.
+
+### Stable Cloudflare publishing
+
+For a machine behind NAT, create a remotely managed Cloudflare Tunnel and
+configure a public hostname for it whose service/origin is
+`http://localhost:18081`. Then start:
+
+```bash
+ais mcp --publish cloudflare \
+  --public-url https://mcp.example.com
+```
+
+On first use `ais` securely asks for the Cloudflare tunnel token and the public
+base URL for that persistent connection identity. It stores the tunnel token
+and public base URL beside the workspace API key in the host-only secret store.
+Later starts reuse the connection identity, URL, tunnel configuration, and API
+key, so a remote AI service only needs to be configured once.
+
+No router port is opened and no MCP port is published on the host. Both Winx
+and `cloudflared` run in the dedicated MCP container; `cloudflared` initiates
+the connection outward through NAT. Winx remains on container loopback and
+validates the configured public Host authority before processing MCP requests.
+
+For a disposable URL instead:
+
+```bash
+ais mcp --publish cloudflare-quick
+```
+
+Quick Tunnel URLs change between launches and therefore are not suitable for
+register-once integrations.
+
+Use the normal lifecycle commands for every transport:
+
+```bash
+ais mcp --status
+ais mcp --status --json
+ais mcp --stop
+```
+
+`SYSTEM_DEFINITION.csv` tracks these MCP capabilities and their implementation
+and verification paths. `tests/system-definition-test.sh` checks the matrix for
+duplicate IDs and stale file references.
+
+### OpenAI Secure MCP Tunnel
 
 1. From the host, go to the repository you want ChatGPT to access. The current
    directory becomes the workspace mounted at `/workspace` inside the MCP

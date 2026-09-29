@@ -101,6 +101,10 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
   plan instead of forcing the code toward the assumption.
 - Keep tests focused on the requested behavior or regression. Avoid broad test
   rewrites unless the existing test boundary cannot express the behavior.
+- Keep `SYSTEM_DEFINITION.csv` aligned with externally visible features and
+  security boundaries. When a tracked feature is added or materially changed,
+  update its implementation and verification paths in the same change; add a
+  focused test before marking it `tracked`.
 
 ## Critical evaluation
 

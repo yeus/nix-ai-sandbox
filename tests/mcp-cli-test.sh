@@ -19,8 +19,10 @@ git -C "$workspace" init -q
 export AI_SANDBOX_STATE_DIR="$test_root/state"
 export AI_SANDBOX_HOME_STORAGE="$test_root/home"
 export AI_SANDBOX_NIX_STORAGE="$test_root/nix"
+export AI_SANDBOX_SECRETS_STORAGE="$test_root/secret-storage"
 export AI_SANDBOX_ANDROID_STATE_DIR="$test_root/android"
 export AI_SANDBOX_TMP_ROOT="$test_root/host-tmp"
+export AI_SANDBOX_NETWORK_MODE=bridge
 export AI_SANDBOX_AUTO_RECONNECT=0
 export AI_SANDBOX_TEST_ROOT="$test_root"
 export PATH="$test_root/bin:/usr/bin:/bin"
@@ -44,7 +46,14 @@ printf ' <%s>' "$@" >>"$AI_SANDBOX_TEST_ROOT/commands.log"
 printf '\n' >>"$AI_SANDBOX_TEST_ROOT/commands.log"
 
 state="$AI_SANDBOX_TEST_ROOT/container-running"
-runtime="$(find "$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp-winx" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1 || true)"
+runtime=""
+for arg in "$@"; do
+  if [[ "$arg" =~ ai-sandbox-[^-]+-mcp-([a-f0-9]{12}) ]]; then
+    runtime="$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp-winx/${BASH_REMATCH[1]}"
+    break
+  fi
+done
+[[ -n "$runtime" ]] || runtime="$(find "$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp-winx" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1 || true)"
 case "${1:-}" in
   image) exit 0 ;;
   run)
@@ -72,6 +81,54 @@ case "${1:-}" in
     ;;
   exec)
     case "$*" in
+      *ai-sandbox-mcp-http-start*)
+        cat >/dev/null
+        mkdir -p "$runtime/http"
+        bind=127.0.0.1
+        [[ "$*" != *0.0.0.0* ]] || bind=0.0.0.0
+        jq -n \
+          --arg bind "$bind" \
+          '{configured: true, process_running: true, bind: $bind, port: 18081, path: "/mcp", auth: "bearer"}' \
+          >"$runtime/http/metadata.json"
+        touch "$runtime/http/running"
+        ;;
+      *ai-sandbox-mcp-http-status*)
+        if [[ -f "$runtime/http/running" ]]; then
+          cat "$runtime/http/metadata.json"
+        elif [[ -f "$runtime/http/metadata.json" ]]; then
+          jq '. + {process_running: false}' "$runtime/http/metadata.json"
+        else
+          echo '{"configured":false,"process_running":false}'
+        fi
+        ;;
+      *ai-sandbox-mcp-http-stop*) rm -f "$runtime/http/running" ;;
+      *ai-sandbox-mcp-cloudflare-start*)
+        mode=quick
+        [[ "$*" != *" named "* ]] || mode=named
+        [[ "$mode" != named ]] || cat >/dev/null
+        mkdir -p "$runtime/publish"
+        if [[ "$mode" == named ]]; then
+          public_url="${@: -1}"
+        else
+          public_url=https://synthetic.trycloudflare.com
+        fi
+        jq -n \
+          --arg mode "$mode" \
+          --arg public_url "$public_url" \
+          '{configured: true, provider: "cloudflare", mode: $mode, process_running: true, public_url: $public_url, version: "2026.9.3"}' \
+          >"$runtime/publish/metadata.json"
+        touch "$runtime/publish/running"
+        ;;
+      *ai-sandbox-mcp-cloudflare-status*)
+        if [[ -f "$runtime/publish/running" ]]; then
+          cat "$runtime/publish/metadata.json"
+        elif [[ -f "$runtime/publish/metadata.json" ]]; then
+          jq '. + {process_running: false}' "$runtime/publish/metadata.json"
+        else
+          echo '{"configured":false,"process_running":false}'
+        fi
+        ;;
+      *ai-sandbox-mcp-cloudflare-stop*) rm -f "$runtime/publish/running" ;;
       *ai-sandbox-mcp-tunnel-start*)
         mkdir -p "$runtime/tunnel"
         jq -n '{configured: true, tunnel_id: "tunnel_0123456789abcdef0123456789abcdef", version: "v0.0.14", process_running: true, healthy: true, ready: true}' \
@@ -114,19 +171,148 @@ printf '%s' tunnel_0123456789abcdef0123456789abcdef \
 printf '%s' sk-synthetic-test-value \
   >"$test_root/secrets/runtime-api-key"
 
-if "$ai_sandbox" mcp "$workspace" --local \
-  >"$test_root/invalid.out" 2>"$test_root/invalid.err"; then
-  echo "Legacy local HTTP mode was accepted" >&2
+mkdir -p "$test_root/secret-target"
+ln -s "$test_root/secret-target" "$test_root/symlink-secrets"
+if AI_SANDBOX_SECRETS_STORAGE="$test_root/symlink-secrets" \
+  "$ai_sandbox" mcp "$workspace" --show-token \
+  >"$test_root/symlink.out" 2>"$test_root/symlink.err"; then
+  echo "MCP accepted a symlinked host secret store" >&2
   exit 1
 fi
-rg -q 'stdio through Secure Tunnel' "$test_root/invalid.err"
+rg -q 'Refusing symlinked AI Sandbox secrets directory' \
+  "$test_root/symlink.err"
+workspace_hash="$(printf '%s' "$workspace" | sha256sum | cut -c1-12)"
+secret_dir="$AI_SANDBOX_SECRETS_STORAGE/mcp/$workspace_hash"
+mkdir -p "$secret_dir"
+chmod 0700 "$AI_SANDBOX_SECRETS_STORAGE" \
+  "$AI_SANDBOX_SECRETS_STORAGE/mcp" "$secret_dir"
+http_token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+printf '%s\n' "$http_token" >"$secret_dir/bearer-token"
+chmod 0600 "$secret_dir/bearer-token"
 
-if "$ai_sandbox" mcp "$workspace" --network host --tunnel \
-  >"$test_root/invalid.out" 2>"$test_root/invalid.err"; then
-  echo "Host networking was accepted" >&2
+: >"$test_root/commands.log"
+if ! "$ai_sandbox" mcp "$workspace" --local --port 18765 \
+  >"$test_root/local.out" 2>"$test_root/local.err"; then
+  cat "$test_root/local.err" >&2
   exit 1
 fi
-rg -q 'network must be bridge' "$test_root/invalid.err"
+rg -q 'Transport: Streamable HTTP' "$test_root/local.out"
+rg -q '^Connection: mcp1$' "$test_root/local.out"
+rg -q 'Endpoint: http://127.0.0.1:18765/mcp' "$test_root/local.out"
+rg -q 'Authentication: bearer token' "$test_root/local.out"
+rg -F '<-p> <127.0.0.1:18765:18081>' "$test_root/commands.log" >/dev/null
+rg -F '<--network> <private>' "$test_root/commands.log" >/dev/null
+rg -F '</usr/local/bin/ai-sandbox-mcp-http-start>' "$test_root/commands.log" >/dev/null
+if rg -q "$http_token" "$test_root/commands.log"; then
+  echo "HTTP auth token leaked to command arguments" >&2
+  exit 1
+fi
+if rg -F "$AI_SANDBOX_SECRETS_STORAGE" "$test_root/commands.log"; then
+  echo "Host MCP secret storage was mounted or passed into the container" >&2
+  exit 1
+fi
+"$ai_sandbox" mcp "$workspace" --show-key >"$test_root/token.out"
+rg -qx "$http_token" "$test_root/token.out"
+"$ai_sandbox" mcp "$workspace" --status --json >"$test_root/local-status.json"
+jq -e '.connection == "mcp1" and .transport == "streamable-http" and .endpoint == "http://127.0.0.1:18765/mcp" and .auth == "bearer" and .health == "ok"' \
+  "$test_root/local-status.json" >/dev/null
+"$ai_sandbox" mcp "$workspace" --stop >"$test_root/local-stop.out"
+
+# The bearer token and local port survive MCP container restarts.
+"$ai_sandbox" mcp "$workspace" --local \
+  >"$test_root/local-repeat.out" 2>"$test_root/local-repeat.err"
+rg -q 'Endpoint: http://127.0.0.1:18765/mcp' "$test_root/local-repeat.out"
+rg -q '^Connection: mcp1$' "$test_root/local-repeat.out"
+"$ai_sandbox" mcp "$workspace" --show-token >"$test_root/token-repeat.out"
+cmp "$test_root/token.out" "$test_root/token-repeat.out"
+"$ai_sandbox" mcp "$workspace" --stop >"$test_root/local-repeat-stop.out"
+
+# A second workspace gets independent credential and port state.
+workspace_two="$test_root/workspace-two"
+mkdir -p "$workspace_two"
+git -C "$workspace_two" init -q
+"$ai_sandbox" mcp "$workspace_two" --local \
+  >"$test_root/local-two.out" 2>"$test_root/local-two.err"
+rg -q '^Connection: mcp2$' "$test_root/local-two.out"
+endpoint_two="$(sed -n 's/^Endpoint: //p' "$test_root/local-two.out")"
+[[ "$endpoint_two" =~ ^http://127\.0\.0\.1:[0-9]+/mcp$ ]]
+[[ "$endpoint_two" != "http://127.0.0.1:18765/mcp" ]]
+"$ai_sandbox" mcp "$workspace_two" --show-token >"$test_root/token-two.out"
+if cmp -s "$test_root/token.out" "$test_root/token-two.out"; then
+  echo "Two workspaces shared one MCP API key" >&2
+  exit 1
+fi
+"$ai_sandbox" mcp "$workspace_two" --stop >"$test_root/local-two-stop.out"
+
+# Explicit names are persistent and unique across workspaces.
+workspace_three="$test_root/workspace-three"
+mkdir -p "$workspace_three"
+git -C "$workspace_three" init -q
+"$ai_sandbox" mcp "$workspace_three" --local --connection designbox \
+  >"$test_root/local-three.out" 2>"$test_root/local-three.err"
+rg -q '^Connection: designbox$' "$test_root/local-three.out"
+"$ai_sandbox" mcp "$workspace_three" --stop >"$test_root/local-three-stop.out"
+"$ai_sandbox" mcp "$workspace_three" --local \
+  >"$test_root/local-three-repeat.out" 2>"$test_root/local-three-repeat.err"
+rg -q '^Connection: designbox$' "$test_root/local-three-repeat.out"
+"$ai_sandbox" mcp "$workspace_three" --stop >"$test_root/local-three-repeat-stop.out"
+
+workspace_four="$test_root/workspace-four"
+mkdir -p "$workspace_four"
+git -C "$workspace_four" init -q
+if "$ai_sandbox" mcp "$workspace_four" --local --connection designbox \
+  >"$test_root/local-four.out" 2>"$test_root/local-four.err"; then
+  echo "Duplicate MCP connection name was accepted" >&2
+  exit 1
+fi
+rg -q "already assigned to another workspace" "$test_root/local-four.err"
+
+
+: >"$test_root/commands.log"
+"$ai_sandbox" mcp "$workspace" --publish cloudflare-quick \
+  >"$test_root/quick.out" 2>"$test_root/quick.err"
+rg -q 'Endpoint: https://synthetic.trycloudflare.com/mcp' "$test_root/quick.out"
+rg -q 'Publisher: Cloudflare Quick Tunnel' "$test_root/quick.out"
+rg -F '</usr/local/bin/ai-sandbox-mcp-cloudflare-start>' "$test_root/commands.log" >/dev/null
+if rg -F '<-p>' "$test_root/commands.log"; then
+  echo "Published MCP unexpectedly opened a host port" >&2
+  exit 1
+fi
+"$ai_sandbox" mcp "$workspace" --stop >"$test_root/quick-stop.out"
+
+printf '%s\n' synthetic-cloudflare-tunnel-token \
+  >"$secret_dir/cloudflare-tunnel-token"
+printf '%s\n' https://mcp.example.test \
+  >"$secret_dir/cloudflare-public-url"
+chmod 0600 "$secret_dir/cloudflare-tunnel-token" \
+  "$secret_dir/cloudflare-public-url"
+: >"$test_root/commands.log"
+"$ai_sandbox" mcp "$workspace" --publish cloudflare \
+  >"$test_root/publish.out" 2>"$test_root/publish.err"
+rg -q 'Endpoint: https://mcp.example.test/mcp' "$test_root/publish.out"
+rg -q 'Publisher: Cloudflare named tunnel' "$test_root/publish.out"
+if rg -q 'synthetic-cloudflare-tunnel-token' "$test_root/commands.log"; then
+  echo "Cloudflare tunnel token leaked to command arguments" >&2
+  exit 1
+fi
+"$ai_sandbox" mcp "$workspace" --status --json >"$test_root/publish-status.json"
+jq -e '.transport == "streamable-http" and .publisher == "cloudflare" and .endpoint == "https://mcp.example.test/mcp" and .auth == "bearer" and .health == "ok"' \
+  "$test_root/publish-status.json" >/dev/null
+"$ai_sandbox" mcp "$workspace" --stop >"$test_root/publish-stop.out"
+
+if "$ai_sandbox" mcp "$workspace" --local --tunnel \
+  >"$test_root/invalid.out" 2>"$test_root/invalid.err"; then
+  echo "Multiple MCP transports were accepted" >&2
+  exit 1
+fi
+rg -q 'mutually exclusive' "$test_root/invalid.err"
+
+if "$ai_sandbox" mcp "$workspace" --local --network host \
+  >"$test_root/invalid.out" 2>"$test_root/invalid.err"; then
+  echo "HTTP MCP accepted host networking" >&2
+  exit 1
+fi
+rg -q 'require isolated bridge/private networking' "$test_root/invalid.err"
 
 "$ai_sandbox" mcp "$workspace" --tunnel --detach \
   >"$test_root/start.out" 2>"$test_root/start.err"
