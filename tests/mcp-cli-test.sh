@@ -48,7 +48,8 @@ printf '\n' >>"$AI_SANDBOX_TEST_ROOT/commands.log"
 state="$AI_SANDBOX_TEST_ROOT/container-running"
 runtime=""
 for arg in "$@"; do
-  if [[ "$arg" =~ ai-sandbox-[^-]+-mcp-([a-f0-9]{12}) ]]; then
+  if [[ "$arg" =~ -mcp-([a-f0-9]{12}) ]] ||
+    [[ "$arg" =~ mcp-winx/([a-f0-9]{12}) ]]; then
     runtime="$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp-winx/${BASH_REMATCH[1]}"
     break
   fi
@@ -130,9 +131,20 @@ case "${1:-}" in
         ;;
       *ai-sandbox-mcp-cloudflare-stop*) rm -f "$runtime/publish/running" ;;
       *ai-sandbox-mcp-tunnel-start*)
+        tunnel_id=""
+        for arg in "$@"; do
+          case "$arg" in
+            tunnel_*) tunnel_id="$arg" ;;
+          esac
+        done
         mkdir -p "$runtime/tunnel"
-        jq -n '{configured: true, tunnel_id: "tunnel_0123456789abcdef0123456789abcdef", version: "v0.0.14", process_running: true, healthy: true, ready: true}' \
+        jq -n \
+          --arg tunnel_id "$tunnel_id" \
+          '{configured: true, tunnel_id: $tunnel_id, version: "v0.0.14", process_running: true, healthy: true, ready: true}' \
           >"$runtime/tunnel/metadata.json"
+        jq -n \
+          '{name: "Synthetic Tunnel", description: "synthetic tunnel description"}' \
+          >"$runtime/tunnel/remote.json"
         touch "$runtime/tunnel/running"
         ;;
       *ai-sandbox-mcp-tunnel-status*)
@@ -166,8 +178,6 @@ if "$ai_sandbox" mcp "$workspace" --tunnel \
 fi
 rg -q 'settings/organization/tunnels' "$test_root/missing.err"
 rg -q 'settings/organization/api-keys' "$test_root/missing.err"
-printf '%s' tunnel_0123456789abcdef0123456789abcdef \
-  >"$test_root/secrets/tunnel-id"
 printf '%s' sk-synthetic-test-value \
   >"$test_root/secrets/runtime-api-key"
 
@@ -189,6 +199,9 @@ chmod 0700 "$AI_SANDBOX_SECRETS_STORAGE" \
 http_token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 printf '%s\n' "$http_token" >"$secret_dir/bearer-token"
 chmod 0600 "$secret_dir/bearer-token"
+printf '%s\n' tunnel_0123456789abcdef0123456789abcdef \
+  >"$secret_dir/tunnel-id"
+chmod 0600 "$secret_dir/tunnel-id"
 
 : >"$test_root/commands.log"
 if ! "$ai_sandbox" mcp "$workspace" --local --port 18765 \
@@ -323,7 +336,7 @@ rg -q '<--network> <host>|<--privileged>' "$test_root/commands.log" && {
   echo "MCP container weakened its boundary" >&2
   exit 1
 }
-runtime="$(find "$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp-winx" -mindepth 1 -maxdepth 1 -type d | head -1)"
+runtime="$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp-winx/$workspace_hash"
 rg -F "<$runtime:/sandbox-home>" "$test_root/commands.log" >/dev/null
 cmp "$AI_SANDBOX_HOME_STORAGE/.codex/AGENTS.md" \
   "$runtime/.codex/AGENTS.md"
@@ -363,8 +376,12 @@ rg -q 'Stop it before changing tunnels' "$test_root/change.err"
 
 "$ai_sandbox" mcp "$workspace" --status --json \
   >"$test_root/status.json"
-jq -e '.implementation == "winx-code-agent" and .transport == "stdio" and .health == "ok" and .tunnel.ready' \
+jq -e '.implementation == "winx-code-agent" and .transport == "stdio" and .health == "ok" and .tunnel.ready and .tunnel.tunnel_id == "tunnel_0123456789abcdef0123456789abcdef"' \
   "$test_root/status.json" >/dev/null
+if [[ -f "$test_root/secrets/tunnel-id" ]]; then
+  echo "Tunnel ID was stored in Secret Service" >&2
+  exit 1
+fi
 
 touch "$test_root/winx-ready"
 "$ai_sandbox" mcp "$workspace" --sessions \
@@ -400,6 +417,8 @@ script -q -f -c \
   >"$test_root/foreground.stdout" 2>&1 &
 foreground_pid=$!
 exec 9>"$test_root/foreground.keys"
+# Answer the tunnel picker: accept the saved workspace tunnel and confirm.
+printf '\n\n' >&9
 for _ in {1..40}; do
   [[ -f "$test_root/container-running" ]] && \
     [[ -f "$runtime/tunnel/running" ]] && \
@@ -510,3 +529,136 @@ fi
 : >"$test_root/commands.log"
 "$ai_sandbox" mcp "$workspace" --stop >"$test_root/android-stop.out"
 [[ ! -f "$test_root/container-running" ]]
+
+# Tunnel IDs are per-workspace state and never stored in Secret Service.
+workspace_five="$test_root/workspace-five"
+mkdir -p "$workspace_five"
+git -C "$workspace_five" init -q
+second_tunnel_id=tunnel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+workspace_five_hash="$(printf '%s' "$workspace_five" | sha256sum | cut -c1-12)"
+secret_dir_five="$AI_SANDBOX_SECRETS_STORAGE/mcp/$workspace_five_hash"
+"$ai_sandbox" mcp "$workspace_five" --tunnel "$second_tunnel_id" --detach \
+  >"$test_root/tunnel-two.out" 2>"$test_root/tunnel-two.err"
+rg -qx "$second_tunnel_id" "$secret_dir_five/tunnel-id"
+"$ai_sandbox" mcp "$workspace_five" --status --json \
+  >"$test_root/tunnel-two-status.json"
+jq -e --arg id "$second_tunnel_id" '.tunnel.tunnel_id == $id' \
+  "$test_root/tunnel-two-status.json" >/dev/null
+"$ai_sandbox" mcp "$workspace_five" --stop >"$test_root/tunnel-two-stop.out"
+
+# A second workspace must not hijack the first workspace's saved tunnel ID.
+rg -qx tunnel_0123456789abcdef0123456789abcdef "$secret_dir/tunnel-id"
+"$ai_sandbox" mcp "$workspace" --tunnel --detach \
+  >"$test_root/tunnel-first.out" 2>"$test_root/tunnel-first.err"
+"$ai_sandbox" mcp "$workspace" --status --json \
+  >"$test_root/tunnel-first-status.json"
+jq -e '.tunnel.tunnel_id == "tunnel_0123456789abcdef0123456789abcdef"' \
+  "$test_root/tunnel-first-status.json" >/dev/null
+"$ai_sandbox" mcp "$workspace" --stop >"$test_root/tunnel-first-stop.out"
+if [[ -f "$test_root/secrets/tunnel-id" ]]; then
+  echo "Tunnel ID was stored in Secret Service" >&2
+  exit 1
+fi
+
+# An explicit ID replaces the saved one only while the transport is stopped.
+third_tunnel_id=tunnel_cccccccccccccccccccccccccccccccc
+"$ai_sandbox" mcp "$workspace" --tunnel "$third_tunnel_id" --detach \
+  >"$test_root/tunnel-switch.out" 2>"$test_root/tunnel-switch.err"
+rg -qx "$third_tunnel_id" "$secret_dir/tunnel-id"
+"$ai_sandbox" mcp "$workspace" --stop >"$test_root/tunnel-switch-stop.out"
+
+# --share-home is an explicit opt-in; the isolated home stays the default.
+if "$ai_sandbox" mcp "$workspace" --local --share-home \
+  >"$test_root/share-local.out" 2>"$test_root/share-local.err"; then
+  echo "--share-home was accepted outside --tunnel" >&2
+  exit 1
+fi
+rg -q 'requires --tunnel' "$test_root/share-local.err"
+: >"$test_root/commands.log"
+"$ai_sandbox" mcp "$workspace" --tunnel --detach --share-home \
+  >"$test_root/share-home.out" 2>"$test_root/share-home.err"
+rg -q 'shares the sandbox home' "$test_root/share-home.err"
+rg -F "<$AI_SANDBOX_HOME_STORAGE:/sandbox-home>" \
+  "$test_root/commands.log" >/dev/null
+if rg -F "mcp-winx/$workspace_hash:/sandbox-home" "$test_root/commands.log"; then
+  echo "shared-home MCP still mounted the isolated home" >&2
+  exit 1
+fi
+"$ai_sandbox" mcp "$workspace" --status --json \
+  >"$test_root/share-home-status.json"
+jq -e '.share_home == true' "$test_root/share-home-status.json" >/dev/null
+"$ai_sandbox" mcp "$workspace" --stop >"$test_root/share-home-stop.out"
+
+: >"$test_root/commands.log"
+"$ai_sandbox" mcp "$workspace" --tunnel --detach \
+  >"$test_root/share-off.out" 2>"$test_root/share-off.err"
+rg -F "<$runtime:/sandbox-home>" "$test_root/commands.log" >/dev/null
+"$ai_sandbox" mcp "$workspace" --status --json \
+  >"$test_root/share-off-status.json"
+jq -e '.share_home == false' "$test_root/share-off-status.json" >/dev/null
+"$ai_sandbox" mcp "$workspace" --stop >"$test_root/share-off-stop.out"
+
+# The interactive picker lists known tunnels, registers new IDs, and takes
+# over a tunnel that another local workspace is still running.
+registry="$AI_SANDBOX_SECRETS_STORAGE/mcp/tunnels.json"
+run_mcp_interactive() {
+  local out="$1"
+  local input="$2"
+  shift 2
+  local fifo="$test_root/picker.keys" pid
+  rm -f "$fifo"
+  mkfifo "$fifo"
+  timeout 20 script -q -f -c "exec \"$ai_sandbox\" mcp $*" "$out" \
+    <"$fifo" >"$out.stdout" 2>&1 &
+  pid=$!
+  exec 9>"$fifo"
+  printf '%s' "$input" >&9
+  wait "$pid" || true
+  exec 9>&-
+  rm -f "$fifo"
+}
+
+workspace_six="$test_root/workspace-six"
+mkdir -p "$workspace_six"
+git -C "$workspace_six" init -q
+workspace_six_hash="$(printf '%s' "$workspace_six" | sha256sum | cut -c1-12)"
+sixth_tunnel_id=tunnel_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+run_mcp_interactive "$test_root/picker-new.out" "n
+$sixth_tunnel_id
+y
+" "$workspace_six" --tunnel --detach
+rg -q 'Known MCP tunnels:' "$test_root/picker-new.out"
+rg -q 'settings/organization/tunnels' "$test_root/picker-new.out"
+rg -q 'chatgpt.com/#settings/Connectors' "$test_root/picker-new.out"
+rg -q "Use $sixth_tunnel_id" "$test_root/picker-new.out"
+rg -qx "$sixth_tunnel_id" \
+  "$AI_SANDBOX_SECRETS_STORAGE/mcp/$workspace_six_hash/tunnel-id"
+jq -e --arg id "$sixth_tunnel_id" \
+  '.tunnels[] | select(.id == $id) | .name == "Synthetic Tunnel"' \
+  "$registry" >/dev/null
+rg -q "$sixth_tunnel_id" \
+  "$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp-winx/$workspace_six_hash/tunnel/metadata.json"
+sixth_number="$(jq -r --arg id "$sixth_tunnel_id" \
+  '.tunnels[] | select(.id == $id) | .number' "$registry")"
+[[ "$sixth_number" =~ ^[1-9][0-9]*$ ]]
+
+workspace_seven="$test_root/workspace-seven"
+mkdir -p "$workspace_seven"
+git -C "$workspace_seven" init -q
+workspace_seven_hash="$(printf '%s' "$workspace_seven" | sha256sum | cut -c1-12)"
+: >"$test_root/commands.log"
+run_mcp_interactive "$test_root/picker-takeover.out" "$sixth_number
+y
+y
+" "$workspace_seven" --tunnel --detach
+rg -q '\[in use by ' "$test_root/picker-takeover.out"
+rg -q 'Synthetic Tunnel' "$test_root/picker-takeover.out"
+rg -q 'is in use by' "$test_root/picker-takeover.out"
+rg -q "$workspace_six_hash.*ai-sandbox-mcp-tunnel-stop" \
+  "$test_root/commands.log" >/dev/null
+jq -e --arg id "$sixth_tunnel_id" --arg ws "$workspace_seven_hash" \
+  '.tunnels[] | select(.id == $id) | .workspaces | index($ws) != null' \
+  "$registry" >/dev/null
+rg -q "$sixth_tunnel_id" \
+  "$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp-winx/$workspace_seven_hash/tunnel/metadata.json"
+"$ai_sandbox" mcp "$workspace_seven" --stop >"$test_root/picker-stop.out"

@@ -324,6 +324,11 @@ and tunnel credentials. This is the register-once path for remote services:
 workspace endpoint after `ais mcp --stop` and a later restart. Quick Tunnels are
 the explicit exception because Cloudflare assigns a new temporary hostname.
 
+The OpenAI tunnel ID is persistent workspace identity as well: each workspace
+remembers its own ID under the host-only secrets tree, while the shared runtime
+API key stays in Secret Service. Different workspaces can therefore run
+separate tunnels in parallel without overwriting each other's registration.
+
 
 HTTP modes use a persistent per-workspace bearer API key. Show it with:
 
@@ -439,11 +444,19 @@ duplicate IDs and stale file references.
    ais mcp --tunnel
    ```
 
-   On first use, `ais` asks for the tunnel ID and runtime key and saves them in
-   the desktop Secret Service through `secret-tool`. You do not need to export
-   a control-plane key or put either value in a project file. Wait until the
-   status says `Tunnel Health: READY`, then leave this terminal running while
-   you connect ChatGPT.
+   On first use, `ais` asks for the tunnel ID and runtime key. In an
+   interactive terminal it prints the locally known tunnels with a stable
+   number, the last four characters of the ID, the operator-visible tunnel name
+   when it has been seen before, and whether another local workspace is running
+   that tunnel right now. Select an entry, enter `n` to type a new ID, and
+   confirm; the same prompt always prints the tunnel management page and the
+   ChatGPT/Codex connector settings link. The runtime API key is saved in the
+   desktop Secret Service through `secret-tool`. The tunnel ID is not a secret:
+   it is saved as workspace identity state under the host-only AI Sandbox
+   secrets tree, so each workspace remembers its own tunnel. You do not need to
+   export a control-plane key or put either value in a project file. Wait until
+   the status says `Tunnel Health: READY`, then leave this terminal running
+   while you connect ChatGPT.
 
 4. In ChatGPT, enable **Developer mode** under **Settings → Security and login**
    if your account or workspace permits it. Open **Plugins**, select **+** to
@@ -477,9 +490,27 @@ For background operation instead, run:
 ais mcp --tunnel --detach
 ```
 
-Later `ais mcp --tunnel` invocations reuse the saved credentials. You can also
-pass a tunnel ID with `--tunnel TUNNEL_ID`; it is saved after the runtime key is
-available. To inspect health or stop a detached tunnel, run:
+Later `ais mcp --tunnel` invocations show the picker again, with the saved ID
+as the default, so no Secret Service tunnel entry and no ChatGPT
+re-registration are needed when you confirm it. Pass a tunnel ID with
+`--tunnel TUNNEL_ID` to skip the picker for scripts and non-interactive runs.
+Because each workspace keeps its own tunnel ID, separate projects can run their
+own tunnels and ChatGPT apps in parallel without overwriting each other's
+registration.
+
+Selecting a tunnel that another local workspace is running triggers a takeover
+question; after confirmation that workspace's tunnel is stopped before this one
+connects. This matters because OpenAI supports only one active `tunnel-client`
+process per tunnel ID for a stdio MCP server: overlapping instances can send
+initialize and tool calls to different machines. Only local containers can be
+detected and stopped; a runtime key cannot list remote runtimes, so a tunnel
+already served by another host cannot be detected from here. The picker's names
+come from the local registry and are refreshed through the tunnel client's
+read-only `admin tunnels get` lookup after each successful start. That lookup
+can read a known tunnel ID, but listing, creating, and deleting tunnels require
+a Platform admin key and Tunnels Manage, so tunnel creation stays manual.
+
+To inspect health or stop a detached tunnel, run:
 
 ```bash
 ais mcp --status
@@ -524,6 +555,23 @@ This gives MCP's Bash access to services on the host network. Private
 networking remains the default. Podman fixes a container's network mode when
 it is created; to switch an existing MCP container, stop MCP and remove that
 container before restarting with the other mode.
+
+The isolated home is the secure default because the remote AI drives Winx
+through Bash: the normal sandbox home stores agent OAuth credentials
+(`~/.codex/auth.json`, `~/.pi/agent/auth.json`), provider configuration, and
+tool state that a remote model must not read. When you intentionally want the
+Winx agent to share tools, caches, and configuration with the normal sandbox
+home, opt in explicitly:
+
+```bash
+ais mcp --tunnel --share-home
+```
+
+This mounts the full sandbox home into the MCP container and prints a warning
+listing the exposure. The MCP agent can then read stored credentials and modify
+agent configuration that other sandboxes load. The mode is recorded in MCP
+status metadata, and the next start returns to the isolated home unless the flag
+is passed again. Stop MCP before switching home modes.
 
 Winx asks the calling AI to read the workspace's `AGENTS.md` and the Codex
 instructions at `/sandbox-home/.codex/AGENTS.md` after initialization. If the

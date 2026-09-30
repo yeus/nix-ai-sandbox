@@ -78,6 +78,19 @@ jq \
   "$source_file" >"$metadata.tmp.$$"
 mv "$metadata.tmp.$$" "$metadata"
 
+# Cache operator-visible tunnel metadata for the host-side picker. The runtime
+# key may read one known tunnel; list/create/delete require an admin key.
+remote="$tunnel_dir/remote.json"
+if [[ "$ready" -eq 1 ]]; then
+  if "$client" admin --json tunnels get "$tunnel_id" \
+    >"$remote.tmp.$$" 2>/dev/null; then
+    chmod 0600 "$remote.tmp.$$"
+    mv "$remote.tmp.$$" "$remote"
+  else
+    rm -f -- "$remote.tmp.$$"
+  fi
+fi
+
 if [[ "$ready" -ne 1 ]]; then
   jq '{process_running, healthy, ready, error, launch_diagnostics}' \
     "$source_file" >&2 2>/dev/null || true

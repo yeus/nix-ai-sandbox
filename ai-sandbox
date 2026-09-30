@@ -32,7 +32,7 @@ Usage:
   ai-sandbox serve [WORKSPACE] [--instance NAME] --stop
     Start or stop browser-based code-server on a stable loopback port.
 
-  ai-sandbox mcp [WORKSPACE] --tunnel [TUNNEL_ID] [--connection NAME] [--network bridge|host] [--detach]
+  ai-sandbox mcp [WORKSPACE] --tunnel [TUNNEL_ID] [--connection NAME] [--network bridge|host] [--detach] [--share-home]
   ai-sandbox mcp [WORKSPACE] --tunnel [--connection NAME] [--android|--emulator] [--android-gpu]
   ai-sandbox mcp [WORKSPACE] --local [--connection NAME] [--port PORT]
   ai-sandbox mcp [WORKSPACE] --publish cloudflare [--connection NAME] [--public-url HTTPS_URL]
@@ -44,6 +44,8 @@ Usage:
   ai-sandbox mcp [WORKSPACE] --attach THREAD_ID
     Start, inspect, or stop Winx MCP with sandboxed Bash access.
     HTTP modes use a persistent per-workspace bearer API key stored only on the host.
+    Tunnel IDs are remembered per workspace; the runtime API key stays in Secret Service.
+    Tunnels default to an isolated MCP home; --share-home exposes the sandbox home.
     Cloudflare named tunnels are stable; cloudflare-quick URLs are temporary.
 
   ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--android|--emulator|--android-emulator] [--android-gpu] [-- COMMAND [ARGS...]]
@@ -1021,6 +1023,8 @@ mcp_detach=0
 mcp_sessions=0
 mcp_attach_id=""
 mcp_reuse_emulator=0
+mcp_share_home=0
+mcp_tunnel_prompt=0
 mcp_android_selected=0
 network_selected=0
 android_mode=0
@@ -1249,6 +1253,11 @@ while [[ $# -gt 0 ]]; do
         shift
       fi
       ;;
+    --share-home)
+      [[ "$cmd" == "mcp" ]] || { echo "--share-home is only valid with mcp" >&2; exit 1; }
+      mcp_share_home=1
+      shift
+      ;;
     --detach)
       [[ "$cmd" == "mcp" ]] || { echo "--detach is only valid with mcp" >&2; exit 1; }
       mcp_detach=1
@@ -1423,6 +1432,11 @@ fi
 
 if [[ -n "$mcp_tunnel_id" && ! "$mcp_tunnel_id" =~ ^tunnel_[a-z0-9]{32}$ ]]; then
   echo "Invalid --tunnel value: expected tunnel_<32 lowercase letters or digits>." >&2
+  exit 1
+fi
+
+if [[ "$mcp_share_home" -eq 1 && "$mcp_tunnel_selected" -ne 1 ]]; then
+  echo "mcp --share-home requires --tunnel." >&2
   exit 1
 fi
 
@@ -1833,6 +1847,8 @@ if command -v git >/dev/null 2>&1 && git -C "$workspace" rev-parse --is-inside-w
   fi
 fi
 
+workspace_hash="$(echo -n "$workspace" | sha256sum | cut -c1-12)"
+
 if [[ "$cmd" == "mcp" ]]; then
   mcp_require_home_path
   if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 && "$mount_root" != "$workspace" ]]; then
@@ -1841,10 +1857,20 @@ if [[ "$cmd" == "mcp" ]]; then
     exit 1
   fi
   if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 && "$mcp_tunnel_selected" -eq 1 ]]; then
-    mcp_resolve_tunnel_credentials \
-      "$mcp_tunnel_id" \
-      mcp_tunnel_id \
-      mcp_runtime_api_key
+    if [[ -z "$mcp_tunnel_id" && -t 0 && -t 2 ]]; then
+      # Interactive starts offer the tunnel picker once the workspace runtime
+      # state is known; only the runtime key is collected eagerly.
+      mcp_load_tunnel_credentials \
+        "$workspace_hash" "" \
+        mcp_tunnel_id mcp_runtime_api_key
+      mcp_tunnel_prompt=1
+    else
+      mcp_resolve_tunnel_credentials \
+        "$workspace_hash" \
+        "$mcp_tunnel_id" \
+        mcp_tunnel_id \
+        mcp_runtime_api_key
+    fi
   fi
 fi
 
@@ -1859,8 +1885,6 @@ if [[ -n "${flake_arg:-}" ]]; then
     fi
   fi
 fi
-
-workspace_hash="$(echo -n "$workspace" | sha256sum | cut -c1-12)"
 
 if [[ "$cmd" == mcp &&
   ( "$mcp_show_token" -eq 1 || "$mcp_transport_count" -ne 0 ) ]]; then
@@ -1936,6 +1960,15 @@ if [[ "$cmd" == "mcp" ]]; then
   mcp_recorded_container="$(mcp_read_metadata_field "$mcp_metadata" container)"
   mcp_recorded_reuse="$(mcp_read_metadata_field "$mcp_metadata" reuse_emulator)"
   mcp_recorded_profile="$(mcp_read_metadata_field "$mcp_metadata" profile)"
+  mcp_recorded_share="$(mcp_read_metadata_field "$mcp_metadata" share_home)"
+  if [[ "$mcp_recorded_share" == true ]]; then
+    mcp_share_home=1
+  elif [[ "$mcp_share_home" -eq 1 ]] &&
+    [[ "$(podman inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)" == running ]]; then
+    echo "MCP is already running with the isolated MCP home." >&2
+    echo "Stop it before switching to --share-home." >&2
+    exit 1
+  fi
   if [[ "$mcp_android_selected" -eq 1 ]]; then
     if [[ -f "$mcp_metadata" && "$mcp_recorded_container" != "$container_name" ]]; then
       echo "MCP is recorded for another container; stop it before changing Android mode." >&2
@@ -2069,17 +2102,23 @@ if [[ "$cmd" == "mcp" ]]; then
   mcp_runtime_host="$(mcp_runtime_host_dir "$workspace_hash")"
   mkdir -p "$mcp_runtime_host/runtime"
   chmod 0700 "$mcp_runtime_host"
-  home_mount_spec="$mcp_runtime_host:/sandbox-home${selinux_label_opt}"
-  if [[ "$mcp_reuse_emulator" -eq 0 && -f "$HOME_STORAGE/.codex/AGENTS.md" ]]; then
-    mkdir -p "$mcp_runtime_host/.codex"
-    if [[ ! -f "$mcp_runtime_host/.codex/AGENTS.md" ]]; then
-      cp "$HOME_STORAGE/.codex/AGENTS.md" "$mcp_runtime_host/.codex/AGENTS.md"
+  if [[ "$mcp_share_home" -eq 1 ]]; then
+    home_mount_spec="$HOME_STORAGE:/sandbox-home${selinux_label_opt}"
+    echo "MCP shares the sandbox home: the remote AI can read stored credentials and agent config." >&2
+    echo "Isolate it again by restarting without --share-home." >&2
+  else
+    home_mount_spec="$mcp_runtime_host:/sandbox-home${selinux_label_opt}"
+    if [[ "$mcp_reuse_emulator" -eq 0 && -f "$HOME_STORAGE/.codex/AGENTS.md" ]]; then
+      mkdir -p "$mcp_runtime_host/.codex"
+      if [[ ! -f "$mcp_runtime_host/.codex/AGENTS.md" ]]; then
+        cp "$HOME_STORAGE/.codex/AGENTS.md" "$mcp_runtime_host/.codex/AGENTS.md"
+      fi
+      mcp_agents_mount_opts="ro"
+      [[ -z "$selinux_label_opt" ]] || mcp_agents_mount_opts+=",Z"
+      mcp_mount_args=(
+        -v "$HOME_STORAGE/.codex/AGENTS.md:/sandbox-home/.codex/AGENTS.md:$mcp_agents_mount_opts"
+      )
     fi
-    mcp_agents_mount_opts="ro"
-    [[ -z "$selinux_label_opt" ]] || mcp_agents_mount_opts+=",Z"
-    mcp_mount_args=(
-      -v "$HOME_STORAGE/.codex/AGENTS.md:/sandbox-home/.codex/AGENTS.md:$mcp_agents_mount_opts"
-    )
   fi
 fi
 
@@ -2373,13 +2412,24 @@ run_mcp() {
     return 1
   fi
 
+  if [[ "$requested_transport" == openai-tunnel && "$mcp_tunnel_prompt" -eq 1 ]]; then
+    tunnel_json="$(mcp_tunnel_status_json \
+      "$container_name" "$runtime_dir" \
+      "$(mcp_runtime_container_dir "$workspace_hash" "$(mcp_home_nested_flag)")")"
+    if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" != true ]]; then
+      mcp_prompt_tunnel_selection \
+        "$workspace_hash" mcp_tunnel_id mcp_runtime_api_key || return 1
+      mcp_tunnel_prompt=0
+    fi
+  fi
+
   if [[ "$requested_transport" == streamable-http && "$existing_state" == running ]]; then
     http_json="$(mcp_http_status_json \
       "$container_name" "$runtime_dir" \
-      "$(mcp_runtime_container_dir "$workspace_hash" "$mcp_reuse_emulator")")"
+      "$(mcp_runtime_container_dir "$workspace_hash" "$(mcp_home_nested_flag)")")"
     publish_json="$(mcp_cloudflare_status_json \
       "$container_name" "$runtime_dir" \
-      "$(mcp_runtime_container_dir "$workspace_hash" "$mcp_reuse_emulator")")"
+      "$(mcp_runtime_container_dir "$workspace_hash" "$(mcp_home_nested_flag)")")"
     if [[ "$(jq -r '.process_running' <<<"$http_json")" == true &&
       ( -z "$requested_publisher" || "$(jq -r '.process_running' <<<"$publish_json")" == true ) ]]; then
       echo "MCP HTTP server is already running for this workspace." >&2
@@ -2420,7 +2470,7 @@ run_mcp() {
   if [[ "$requested_transport" == openai-tunnel ]]; then
     tunnel_json="$(mcp_tunnel_status_json \
       "$container_name" "$runtime_dir" \
-      "$(mcp_runtime_container_dir "$workspace_hash" "$mcp_reuse_emulator")")"
+      "$(mcp_runtime_container_dir "$workspace_hash" "$(mcp_home_nested_flag)")")"
     if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" != true ]]; then
       new_tunnel=1
       trap 'trap - INT TERM HUP; mcp_stop_process "$container_name" "$workspace_hash" 1 || true; exit 130' INT
@@ -2440,9 +2490,9 @@ run_mcp() {
       "$runtime_dir/runtime/metadata.json" \
       "$(mcp_container_id "$container_name")" "$mcp_mode" \
       "$container_name" "$mcp_reuse_emulator" "$runtime_profile" \
-      openai-tunnel
+      openai-tunnel "" "" "" "$mcp_share_home"
     if ! mcp_store_tunnel_credentials \
-      "$mcp_tunnel_id" "$mcp_runtime_api_key"; then
+      "$workspace_hash" "$mcp_tunnel_id" "$mcp_runtime_api_key"; then
       trap - INT TERM HUP
       [[ "$new_tunnel" -eq 0 ]] ||
         mcp_stop_process "$container_name" "$workspace_hash" 1 || true
@@ -2469,7 +2519,7 @@ run_mcp() {
       "$runtime_dir/runtime/metadata.json" \
       "$(mcp_container_id "$container_name")" "$mcp_mode" \
       "$container_name" 0 "$runtime_profile" streamable-http "" \
-      "$mcp_host_port" ""
+      "$mcp_host_port" "" "$mcp_share_home"
     mcp_http_token=""
     mcp_emit_status "$workspace" "$container_name" "$workspace_hash" "$mcp_json"
     return
@@ -2512,7 +2562,7 @@ run_mcp() {
     "$runtime_dir/runtime/metadata.json" \
     "$(mcp_container_id "$container_name")" "$mcp_mode" \
     "$container_name" 0 "$runtime_profile" streamable-http \
-    "$mcp_publish" "" "$mcp_public_url"
+    "$mcp_publish" "" "$mcp_public_url" "$mcp_share_home"
   mcp_http_token=""
   mcp_cloudflare_token=""
   mcp_emit_status "$workspace" "$container_name" "$workspace_hash" "$mcp_json"

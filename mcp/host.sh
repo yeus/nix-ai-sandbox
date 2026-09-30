@@ -7,6 +7,7 @@ AI_SANDBOX_MCP_CLOUDFLARED_VERSION="2026.9.3"
 AI_SANDBOX_MCP_HTTP_PORT="18081"
 AI_SANDBOX_MCP_TUNNELS_URL="https://platform.openai.com/settings/organization/tunnels"
 AI_SANDBOX_MCP_RUNTIME_KEYS_URL="https://platform.openai.com/settings/organization/api-keys"
+AI_SANDBOX_MCP_CONNECTORS_URL="https://chatgpt.com/#settings/Connectors"
 
 mcp_secret_lookup() {
   local field="$1"
@@ -41,11 +42,20 @@ mcp_explain_missing_tunnel_credentials() {
   fi
 }
 
-mcp_resolve_tunnel_credentials() {
-  local requested_tunnel_id="$1"
-  local -n resolved_tunnel_id="$2"
-  local -n resolved_runtime_key="$3"
-  local saved_tunnel_id saved_runtime_key
+mcp_validate_tunnel_id() {
+  local tunnel_id="$1"
+  [[ "$tunnel_id" =~ ^tunnel_[a-z0-9]{32}$ ]] || {
+    echo "Invalid tunnel ID: expected tunnel_<32 lowercase letters or digits>." >&2
+    return 1
+  }
+}
+
+mcp_load_tunnel_credentials() {
+  local hash="$1"
+  local requested_tunnel_id="$2"
+  local -n resolved_tunnel_id="$3"
+  local -n resolved_runtime_key="$4"
+  local dir id_file saved_tunnel_id
 
   if ! command -v secret-tool >/dev/null 2>&1; then
     echo "Secure MCP Tunnel setup requires Secret Service (secret-tool)." >&2
@@ -53,25 +63,57 @@ mcp_resolve_tunnel_credentials() {
     return 1
   fi
 
-  saved_tunnel_id="$(mcp_secret_lookup tunnel-id)"
-  saved_runtime_key="$(mcp_secret_lookup runtime-api-key)"
-  resolved_tunnel_id="${requested_tunnel_id:-$saved_tunnel_id}"
-  resolved_runtime_key="$saved_runtime_key"
+  mcp_prepare_secret_dir "$hash"
+  dir="$(mcp_secret_workspace_dir "$hash")"
+  id_file="$dir/tunnel-id"
+  [[ ! -L "$id_file" ]] || {
+    echo "Refusing symlinked MCP tunnel ID state." >&2
+    return 1
+  }
+  if [[ -e "$id_file" ]]; then
+    [[ -f "$id_file" && "$(stat -c %u "$id_file")" == "$(id -u)" ]] || {
+      echo "MCP tunnel ID state must be a user-owned regular file." >&2
+      return 1
+    }
+    chmod 0600 "$id_file"
+  fi
 
-  mcp_explain_missing_tunnel_credentials \
-    "$resolved_tunnel_id" "$resolved_runtime_key"
-  if { [[ -z "$resolved_tunnel_id" ]] || [[ -z "$resolved_runtime_key" ]]; } &&
-    { [[ ! -t 0 ]] || [[ ! -t 2 ]]; }; then
+  saved_tunnel_id=""
+  [[ ! -f "$id_file" ]] || saved_tunnel_id="$(<"$id_file")"
+  resolved_tunnel_id="${requested_tunnel_id:-$saved_tunnel_id}"
+  resolved_runtime_key="$(mcp_secret_lookup runtime-api-key)"
+}
+
+mcp_resolve_tunnel_credentials() {
+  local hash="$1"
+  local requested_tunnel_id="$2"
+  local -n resolved_tunnel_id="$3"
+  local -n resolved_runtime_key="$4"
+  local loaded_tunnel_id loaded_runtime_key
+
+  mcp_load_tunnel_credentials \
+    "$hash" "$requested_tunnel_id" \
+    loaded_tunnel_id loaded_runtime_key
+  resolved_tunnel_id="$loaded_tunnel_id"
+  resolved_runtime_key="$loaded_runtime_key"
+
+  if [[ -n "$resolved_tunnel_id" && -n "$resolved_runtime_key" ]]; then
+    mcp_validate_tunnel_id "$resolved_tunnel_id"
+    return
+  fi
+
+  if [[ ! -t 0 || ! -t 2 ]]; then
+    mcp_explain_missing_tunnel_credentials \
+      "$resolved_tunnel_id" "$resolved_runtime_key"
     echo "Tunnel setup needs an interactive terminal to securely collect missing values." >&2
     return 1
   fi
 
   if [[ -z "$resolved_tunnel_id" ]]; then
-    read -r -p "Tunnel ID: " resolved_tunnel_id
-  fi
-  if [[ ! "$resolved_tunnel_id" =~ ^tunnel_[a-z0-9]{32}$ ]]; then
-    echo "Invalid tunnel ID: expected tunnel_<32 lowercase letters or digits>." >&2
-    return 1
+    mcp_prompt_tunnel_selection \
+      "$hash" loaded_tunnel_id loaded_runtime_key || return 1
+    resolved_tunnel_id="$loaded_tunnel_id"
+    resolved_runtime_key="$loaded_runtime_key"
   fi
   if [[ -z "$resolved_runtime_key" ]]; then
     read -r -s -p "Runtime API key: " resolved_runtime_key
@@ -81,18 +123,28 @@ mcp_resolve_tunnel_credentials() {
       return 1
     fi
   fi
+  mcp_validate_tunnel_id "$resolved_tunnel_id"
 }
 
 mcp_store_tunnel_credentials() {
-  local tunnel_id="$1"
-  local runtime_key="$2"
-  local saved_tunnel_id saved_runtime_key
-  saved_tunnel_id="$(mcp_secret_lookup tunnel-id)"
-  saved_runtime_key="$(mcp_secret_lookup runtime-api-key)"
+  local hash="$1"
+  local tunnel_id="$2"
+  local runtime_key="$3"
+  local dir id_file temporary saved_runtime_key
 
-  if [[ "$tunnel_id" != "$saved_tunnel_id" ]]; then
-    mcp_secret_store tunnel-id "AI Sandbox MCP tunnel ID" "$tunnel_id"
-  fi
+  mcp_prepare_secret_dir "$hash"
+  dir="$(mcp_secret_workspace_dir "$hash")"
+  id_file="$dir/tunnel-id"
+  [[ ! -L "$id_file" ]] || {
+    echo "Refusing symlinked MCP tunnel ID state." >&2
+    return 1
+  }
+  temporary="$id_file.tmp.$$"
+  printf '%s\n' "$tunnel_id" >"$temporary"
+  chmod 0600 "$temporary"
+  mv "$temporary" "$id_file"
+
+  saved_runtime_key="$(mcp_secret_lookup runtime-api-key)"
   if [[ "$runtime_key" != "$saved_runtime_key" ]]; then
     mcp_secret_store \
       runtime-api-key \
@@ -129,6 +181,255 @@ mcp_prepare_secret_dir() {
     echo "MCP secrets directory is not owned by the current user: $dir" >&2
     return 1
   fi
+}
+
+mcp_tunnel_registry_file() {
+  printf '%s/mcp/tunnels.json\n' "$SECRETS_STORAGE"
+}
+
+mcp_tunnel_registry_lock_file() {
+  printf '%s/mcp/.tunnels.lock\n' "$SECRETS_STORAGE"
+}
+
+mcp_tunnel_registry_upsert() {
+  local hash="$1"
+  local tunnel_id="$2"
+  local name="$3"
+  local description="$4"
+  local file lock_file lock_fd current now temporary
+
+  mcp_prepare_secret_dir "$hash"
+  file="$(mcp_tunnel_registry_file)"
+  lock_file="$(mcp_tunnel_registry_lock_file)"
+  [[ ! -L "$file" && ! -L "$lock_file" ]] || {
+    echo "Refusing symlinked MCP tunnel registry state." >&2
+    return 1
+  }
+  exec {lock_fd}>"$lock_file"
+  chmod 0600 "$lock_file"
+  if ! flock -w 2 "$lock_fd"; then
+    echo "Another MCP tunnel registry update is already in progress." >&2
+    exec {lock_fd}>&-
+    return 1
+  fi
+
+  current='{"version": 1, "tunnels": []}'
+  if [[ -f "$file" ]]; then
+    current="$(jq -c . "$file" 2>/dev/null || printf '%s' "$current")"
+  fi
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  temporary="$file.tmp.$$"
+  if ! jq -c \
+    --arg id "$tunnel_id" \
+    --arg hash "$hash" \
+    --arg name "$name" \
+    --arg description "$description" \
+    --arg now "$now" \
+    '
+    .tunnels = (.tunnels // []) |
+    if any(.tunnels[]; .id == $id) then
+      .tunnels |= map(
+        if .id == $id then
+          .name = (if $name != "" then $name else (.name // "") end) |
+          .description = (if $description != "" then $description else (.description // "") end) |
+          .last_used_at = $now |
+          .workspaces = (((.workspaces // []) + [$hash]) | unique)
+        else . end
+      )
+    else
+      .tunnels += [{
+        number: (((.tunnels | map(.number) | max) // 0) + 1),
+        id: $id,
+        name: $name,
+        description: $description,
+        last_used_at: $now,
+        workspaces: [$hash]
+      }]
+    end
+    ' <<<"$current" >"$temporary"; then
+    rm -f -- "$temporary"
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
+    echo "Could not update the MCP tunnel registry." >&2
+    return 1
+  fi
+  chmod 0600 "$temporary"
+  mv "$temporary" "$file"
+  flock -u "$lock_fd"
+  exec {lock_fd}>&-
+}
+
+mcp_read_tunnel_remote_json() {
+  local runtime_dir="$1"
+  local field="$2"
+  local file="$runtime_dir/tunnel/remote.json"
+  [[ -f "$file" && ! -L "$file" ]] || return 0
+  jq -r --arg field "$field" '((.data // .)[$field]) // empty' "$file" 2>/dev/null || true
+}
+
+mcp_tunnel_local_usage() {
+  local tunnel_id="$1"
+  local dir hash metadata container tunnel_metadata
+  for dir in "$HOME_STORAGE"/.ai-sandbox/mcp-winx/*/; do
+    [[ -d "$dir" ]] || continue
+    tunnel_metadata="$dir/tunnel/metadata.json"
+    [[ -f "$tunnel_metadata" && ! -L "$tunnel_metadata" ]] || continue
+    [[ "$(jq -r '.tunnel_id // empty' "$tunnel_metadata" 2>/dev/null)" == "$tunnel_id" ]] || continue
+    container="$(mcp_read_metadata_field "$dir/runtime/metadata.json" container)"
+    [[ -n "$container" ]] || continue
+    container_is_running "$container" || continue
+    [[ "$(jq -r '.process_running // false' "$tunnel_metadata" 2>/dev/null)" == true ]] || continue
+    hash="$(basename "$dir")"
+    printf '%s\t%s\n' "$hash" "$container"
+  done
+}
+
+mcp_prompt_tunnel_selection() {
+  local hash="$1"
+  local -n selected_tunnel_id="$2"
+  local -n selected_runtime_key="$3"
+  local dir saved_tunnel_id file choice candidate default_choice="n" confirm answer
+  local index number id name short usage other_hash container other_reuse other_share other_nested
+  local -a known_ids=() known_numbers=()
+
+  if [[ ! -t 0 || ! -t 2 ]]; then
+    mcp_explain_missing_tunnel_credentials "$selected_tunnel_id" "$selected_runtime_key"
+    echo "Tunnel setup needs an interactive terminal to securely collect missing values." >&2
+    return 1
+  fi
+
+  dir="$(mcp_secret_workspace_dir "$hash")"
+  saved_tunnel_id=""
+  [[ ! -f "$dir/tunnel-id" ]] || saved_tunnel_id="$(<"$dir/tunnel-id")"
+
+  echo >&2
+  echo "Known MCP tunnels:" >&2
+  file="$(mcp_tunnel_registry_file)"
+  if [[ -f "$file" && ! -L "$file" ]]; then
+    while IFS=$'\t' read -r number id name; do
+      [[ -n "$number" && -n "$id" ]] || continue
+      short="${id: -4}"
+      usage=free
+      while IFS=$'\t' read -r other_hash container; do
+        [[ -n "$container" ]] || continue
+        [[ "$other_hash" != "$hash" ]] || continue
+        usage="in use by $container"
+        break
+      done < <(mcp_tunnel_local_usage "$id")
+      known_ids+=("$id")
+      known_numbers+=("$number")
+      printf '  [%s] ...%s  %s  [%s]\n' \
+        "$number" "$short" "${name:-unknown}" "$usage" >&2
+      [[ "$id" != "$saved_tunnel_id" ]] || default_choice="$number"
+    done < <(jq -r '.tunnels[]? | [.number, .id, (.name // "")] | @tsv' "$file" 2>/dev/null)
+  fi
+  printf '  [n] enter or create a new tunnel ID\n' >&2
+  echo >&2
+  echo "Create tunnels: $AI_SANDBOX_MCP_TUNNELS_URL" >&2
+  echo "ChatGPT/Codex connector settings: $AI_SANDBOX_MCP_CONNECTORS_URL" >&2
+  echo >&2
+
+  while true; do
+    if ! read -r -p "Select tunnel [$default_choice]: " choice; then
+      echo "Tunnel selection cancelled." >&2
+      return 1
+    fi
+    [[ -n "$choice" ]] || choice="$default_choice"
+    candidate=""
+    case "$choice" in
+      n|N)
+        if ! read -r -p "Tunnel ID: " candidate; then
+          echo "Tunnel selection cancelled." >&2
+          return 1
+        fi
+        ;;
+      tunnel_*)
+        candidate="$choice"
+        ;;
+      *)
+        if [[ "$choice" =~ ^[0-9]+$ ]]; then
+          for index in "${!known_numbers[@]}"; do
+            [[ "${known_numbers[$index]}" == "$choice" ]] || continue
+            candidate="${known_ids[$index]}"
+            break
+          done
+        elif [[ "$choice" =~ ^[a-f0-9]{4}$ ]]; then
+          for index in "${!known_ids[@]}"; do
+            [[ "${known_ids[$index]: -4}" == "$choice" ]] || continue
+            candidate="${known_ids[$index]}"
+            break
+          done
+        fi
+        [[ -n "$candidate" ]] || {
+          echo "Unknown tunnel selection: $choice" >&2
+          continue
+        }
+        ;;
+    esac
+    if [[ -z "$candidate" ]]; then
+      echo "Tunnel ID cannot be empty." >&2
+      continue
+    fi
+    if [[ ! "$candidate" =~ ^tunnel_[a-z0-9]{32}$ ]]; then
+      echo "Invalid tunnel ID: expected tunnel_<32 lowercase letters or digits>." >&2
+      continue
+    fi
+    break
+  done
+
+  local -a using_hashes=() using_containers=()
+  while IFS=$'\t' read -r other_hash container; do
+    [[ -n "$container" ]] || continue
+    [[ "$other_hash" != "$hash" ]] || continue
+    using_hashes+=("$other_hash")
+    using_containers+=("$container")
+  done < <(mcp_tunnel_local_usage "$candidate")
+  for index in "${!using_hashes[@]}"; do
+    container="${using_containers[$index]}"
+    other_hash="${using_hashes[$index]}"
+    if ! read -r -p "Tunnel $candidate is in use by $container. Stop it and continue? [y/N]: " answer; then
+      echo "Selection cancelled." >&2
+      return 1
+    fi
+    if [[ "$answer" != y && "$answer" != Y ]]; then
+      echo "Selection cancelled." >&2
+      return 1
+    fi
+    other_reuse="$(mcp_read_metadata_field \
+      "$HOME_STORAGE/.ai-sandbox/mcp-winx/$other_hash/runtime/metadata.json" reuse_emulator)"
+    other_share="$(mcp_read_metadata_field \
+      "$HOME_STORAGE/.ai-sandbox/mcp-winx/$other_hash/runtime/metadata.json" share_home)"
+    other_nested=0
+    [[ "$other_reuse" == true || "$other_share" == true ]] && other_nested=1
+    if ! mcp_stop_tunnel "$container" "$other_hash" 1 \
+      "$(mcp_runtime_container_dir "$other_hash" "$other_nested")"; then
+      echo "Could not stop the tunnel used by $container." >&2
+      return 1
+    fi
+    echo "Stopped the tunnel used by $container." >&2
+  done
+
+  if ! read -r -p "Use $candidate? [Y/n]: " confirm; then
+    echo "Selection cancelled." >&2
+    return 1
+  fi
+  if [[ -n "$confirm" && "$confirm" != y && "$confirm" != Y ]]; then
+    echo "Selection cancelled." >&2
+    return 1
+  fi
+  if [[ -z "$selected_runtime_key" ]]; then
+    if ! read -r -s -p "Runtime API key: " selected_runtime_key; then
+      echo "Selection cancelled." >&2
+      return 1
+    fi
+    echo >&2
+    if [[ -z "$selected_runtime_key" ]]; then
+      echo "Runtime API key cannot be empty." >&2
+      return 1
+    fi
+  fi
+  selected_tunnel_id="$candidate"
+  mcp_tunnel_registry_upsert "$hash" "$candidate" "" ""
 }
 
 mcp_read_connection_name() {
@@ -365,11 +666,19 @@ mcp_runtime_host_dir() {
 
 mcp_runtime_container_dir() {
   local hash="$1"
-  local reuse_emulator="$2"
-  if [[ "$reuse_emulator" -eq 1 ]]; then
+  local nested_home="$2"
+  if [[ "$nested_home" -eq 1 ]]; then
     printf '/sandbox-home/.ai-sandbox/mcp-winx/%s\n' "$hash"
   else
     printf '/sandbox-home\n'
+  fi
+}
+
+mcp_home_nested_flag() {
+  if [[ "${mcp_reuse_emulator:-0}" -eq 1 || "${mcp_share_home:-0}" -eq 1 ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
   fi
 }
 
@@ -415,13 +724,17 @@ mcp_start_tunnel() {
   local legacy_container="$5"
   local runtime_dir runtime_container_dir tunnel_json existing_tunnel_id
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
-  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$(mcp_home_nested_flag)")"
   tunnel_json="$(mcp_tunnel_status_json \
     "$container" "$runtime_dir" "$runtime_container_dir")"
 
   if [[ "$(jq -r '.process_running' <<<"$tunnel_json")" == true ]]; then
     existing_tunnel_id="$(jq -r '.tunnel_id // empty' <<<"$tunnel_json")"
     if [[ "$existing_tunnel_id" == "$tunnel_id" ]]; then
+      mcp_tunnel_registry_upsert \
+        "$hash" "$tunnel_id" \
+        "$(mcp_read_tunnel_remote_json "$runtime_dir" name)" \
+        "$(mcp_read_tunnel_remote_json "$runtime_dir" description)" || true
       echo "Secure MCP Tunnel is already running for this workspace." >&2
       return 0
     fi
@@ -451,6 +764,11 @@ mcp_start_tunnel() {
     "$AI_SANDBOX_MCP_TUNNEL_VERSION" \
     "$tunnel_id" \
     "$AI_SANDBOX_MCP_VERSION" >&2
+
+  mcp_tunnel_registry_upsert \
+    "$hash" "$tunnel_id" \
+    "$(mcp_read_tunnel_remote_json "$runtime_dir" name)" \
+    "$(mcp_read_tunnel_remote_json "$runtime_dir" description)" || true
 }
 
 mcp_stop_tunnel() {
@@ -459,7 +777,7 @@ mcp_stop_tunnel() {
   local quiet="${3:-0}"
   local runtime_dir runtime_container_dir tunnel_json tunnel_version attempt
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
-  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
+  runtime_container_dir="${4:-$(mcp_runtime_container_dir "$hash" "$(mcp_home_nested_flag)")}"
   tunnel_json="$(mcp_tunnel_status_json \
     "$container" "$runtime_dir" "$runtime_container_dir")"
 
@@ -513,7 +831,7 @@ mcp_start_http() {
   local bind_host="$4"
   local allowed_host="$5"
   local runtime_container_dir
-  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$(mcp_home_nested_flag)")"
 
   echo "Preparing Winx MCP HTTP server..." >&2
   podman exec "$container" \
@@ -531,7 +849,7 @@ mcp_stop_http() {
   local container="$1"
   local hash="$2"
   local runtime_container_dir
-  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$(mcp_home_nested_flag)")"
   container_is_running "$container" || return 0
   podman exec "$container" \
     /usr/local/bin/ai-sandbox-mcp-http-stop \
@@ -570,7 +888,7 @@ mcp_start_cloudflare() {
   local public_url="$4"
   local tunnel_token="$5"
   local runtime_container_dir origin_url
-  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$(mcp_home_nested_flag)")"
   origin_url="http://127.0.0.1:$AI_SANDBOX_MCP_HTTP_PORT"
 
   mcp_prepare_cloudflare "$container"
@@ -592,7 +910,7 @@ mcp_stop_cloudflare() {
   local container="$1"
   local hash="$2"
   local runtime_container_dir
-  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$(mcp_home_nested_flag)")"
   container_is_running "$container" || return 0
   podman exec "$container" \
     /usr/local/bin/ai-sandbox-mcp-cloudflare-stop \
@@ -612,9 +930,9 @@ mcp_emit_status() {
   local hash="$3"
   local json_output="$4"
   local runtime_dir runtime_container_dir metadata mode profile transport publisher
-  local health endpoint host_port public_url connection tunnel_json tunnel_ui http_json publish_json
+  local health endpoint host_port public_url connection tunnel_json tunnel_ui http_json publish_json share_home
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
-  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$(mcp_home_nested_flag)")"
   metadata="$runtime_dir/runtime/metadata.json"
   mode="$(mcp_read_metadata_field "$metadata" mode)"
   profile="$(mcp_read_metadata_field "$metadata" profile)"
@@ -622,6 +940,7 @@ mcp_emit_status() {
   publisher="$(mcp_read_metadata_field "$metadata" publisher)"
   host_port="$(mcp_read_metadata_field "$metadata" host_port)"
   public_url="$(mcp_read_metadata_field "$metadata" public_url)"
+  share_home="$(mcp_read_metadata_field "$metadata" share_home)"
   connection="$(mcp_read_connection_name "$hash")"
 
   if [[ "$transport" == streamable-http ]]; then
@@ -726,8 +1045,9 @@ mcp_emit_status() {
       --arg implementation "$AI_SANDBOX_MCP_IMPLEMENTATION" \
       --arg version "$AI_SANDBOX_MCP_VERSION" \
       --arg health "$health" \
+      --arg share_home "$share_home" \
       --argjson tunnel "$tunnel_json" \
-      '{workspace: $workspace, connection: ($connection | if length > 0 then . else null end), container: $container, profile: ($profile | if length > 0 then . else null end), reuse_emulator: ($reuse_emulator == 1), mode: ($mode | if length > 0 then . else null end), implementation: $implementation, version: $version, transport: "stdio", endpoint: null, health: $health, tunnel: $tunnel}'
+      '{workspace: $workspace, connection: ($connection | if length > 0 then . else null end), container: $container, profile: ($profile | if length > 0 then . else null end), reuse_emulator: ($reuse_emulator == 1), share_home: ($share_home == "true"), mode: ($mode | if length > 0 then . else null end), implementation: $implementation, version: $version, transport: "stdio", endpoint: null, health: $health, tunnel: $tunnel}'
     return
   fi
 
@@ -738,6 +1058,7 @@ mcp_emit_status() {
   echo "Container: $container"
   [[ -z "$profile" ]] || echo "Profile: $profile"
   [[ "${mcp_reuse_emulator:-0}" -eq 0 ]] || echo "Reusing emulator container: yes"
+  [[ "$share_home" != true ]] || echo "Home: shared sandbox home"
   echo "Mode: ${mode:-unknown}"
   echo "Implementation: $AI_SANDBOX_MCP_IMPLEMENTATION @ $AI_SANDBOX_MCP_VERSION"
   echo "Transport: stdio through Secure MCP Tunnel"
@@ -821,7 +1142,7 @@ mcp_supervise_tunnel() {
   local activity_pid="" stop_signal="" result=0 key=""
   local consumer="ais-foreground-$BASHPID"
   runtime_dir="$(mcp_runtime_host_dir "$hash")"
-  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$mcp_reuse_emulator")"
+  runtime_container_dir="$(mcp_runtime_container_dir "$hash" "$(mcp_home_nested_flag)")"
 
   touch "$runtime_dir/runtime/usage.jsonl"
   chmod 0600 "$runtime_dir/runtime/usage.jsonl"
@@ -904,6 +1225,7 @@ mcp_write_metadata() {
   local publisher="${8:-}"
   local host_port="${9:-}"
   local public_url="${10:-}"
+  local share_home="${11:-0}"
   local tmp_path="$path.tmp.$$"
   mkdir -p "$(dirname "$path")"
   jq -n \
@@ -911,6 +1233,7 @@ mcp_write_metadata() {
     --arg container "$container" \
     --arg profile "$profile" \
     --argjson reuse_emulator "$reuse_emulator" \
+    --argjson share_home "$share_home" \
     --arg mode "$mode" \
     --arg implementation "$AI_SANDBOX_MCP_IMPLEMENTATION" \
     --arg version "$AI_SANDBOX_MCP_VERSION" \
@@ -923,6 +1246,7 @@ mcp_write_metadata() {
       container: $container,
       profile: $profile,
       reuse_emulator: ($reuse_emulator == 1),
+      share_home: ($share_home == 1),
       mode: $mode,
       implementation: $implementation,
       version: $version,

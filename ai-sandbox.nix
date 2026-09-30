@@ -162,7 +162,7 @@ in
     secretsStorage = lib.mkOption {
       type = lib.types.str;
       default = "${config.home.homeDirectory}/.cache/ai-sandbox/secrets";
-      description = "Absolute host-only path for persistent MCP credentials; never mounted into sandbox containers.";
+      description = "Absolute host-only path for persistent MCP credentials and identity state; never mounted into sandbox containers.";
     };
 
     stateDir = lib.mkOption {
