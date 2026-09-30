@@ -69,13 +69,14 @@ func (c *gatewayConfig) resolveUpstream(assignment slotAssignment) (slotUpstream
 		return slotUpstream{}, errSlotUnavailable
 	}
 	var metadata struct {
-		Transport string `json:"transport"`
-		HostPort  int    `json:"host_port"`
+		Transport string          `json:"transport"`
+		HostPort  json.RawMessage `json:"host_port"`
 	}
 	if err := json.Unmarshal(raw, &metadata); err != nil {
 		return slotUpstream{}, errSlotUnavailable
 	}
-	if metadata.Transport != "streamable-http" || metadata.HostPort < 1 || metadata.HostPort > 65535 {
+	port, err := parseHostPort(metadata.HostPort)
+	if err != nil || metadata.Transport != "streamable-http" {
 		return slotUpstream{}, errSlotUnavailable
 	}
 	tokenPath := filepath.Join(
@@ -86,7 +87,20 @@ func (c *gatewayConfig) resolveUpstream(assignment slotAssignment) (slotUpstream
 		return slotUpstream{}, errSlotUnavailable
 	}
 	return slotUpstream{
-		host:  net.JoinHostPort("127.0.0.1", strconv.Itoa(metadata.HostPort)),
+		host:  net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
 		token: token,
 	}, nil
+}
+
+// parseHostPort accepts both JSON numbers and the string form written by
+// older metadata files, so pre-existing workspace state keeps routing.
+func parseHostPort(raw json.RawMessage) (int, error) {
+	if len(raw) == 0 {
+		return 0, errSlotUnavailable
+	}
+	port, err := strconv.Atoi(strings.Trim(string(raw), "\""))
+	if err != nil || port < 1 || port > 65535 {
+		return 0, errSlotUnavailable
+	}
+	return port, nil
 }

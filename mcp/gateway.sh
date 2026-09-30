@@ -82,7 +82,7 @@ mcp_gateway_registry_require() {
 }
 
 mcp_gateway_mutate() {
-  local file lock_file lock_fd current tmp
+  local file lock_file lock_fd current tmp jq_err
   mcp_gateway_prepare
   file="$(mcp_gateway_registry_file)"
   lock_file="$(mcp_gateway_lock_file)"
@@ -102,13 +102,16 @@ mcp_gateway_mutate() {
   [[ -n "$current" ]] ||
     current='{"version":1,"size":0,"auth":"capability","port":'"$AI_SANDBOX_MCP_GATEWAY_PORT"',"public_url":null,"slots":{}}'
   tmp="$file.tmp.$$"
-  if ! jq -c "$@" <<<"$current" >"$tmp"; then
-    rm -f -- "$tmp"
+  jq_err="$tmp.err"
+  if ! jq -c "$@" <<<"$current" >"$tmp" 2>"$jq_err"; then
+    [[ ! -s "$jq_err" ]] || cat "$jq_err" >&2
+    rm -f -- "$tmp" "$jq_err"
     flock -u "$lock_fd"
     exec {lock_fd}>&-
     echo "Could not update the MCP gateway registry." >&2
     return 1
   fi
+  rm -f -- "$jq_err"
   chmod 0600 "$tmp"
   mv "$tmp" "$file"
   flock -u "$lock_fd"
@@ -156,7 +159,7 @@ mcp_gateway_slot_token() {
 
 mcp_gateway_setup() {
   local size="${1:-$AI_SANDBOX_MCP_GATEWAY_DEFAULT_SLOTS}"
-  local current max_assigned
+  local current
   [[ "$size" =~ ^[1-9][0-9]?$ ]] || {
     echo "Invalid slot count: $size (expected 1-99)." >&2
     return 1
@@ -168,13 +171,16 @@ mcp_gateway_setup() {
       --argjson port "$AI_SANDBOX_MCP_GATEWAY_PORT" \
       '{version: 1, size: $size, auth: "capability", port: $port, public_url: null, slots: {}}'
   else
-    max_assigned="$(jq -r '[.slots | keys[] | tonumber] | max // 0' <<<"$current")"
-    if [[ "$size" -lt "$max_assigned" ]]; then
-      echo "Slot pool size $size is below the highest assigned slot $max_assigned." >&2
-      echo "Release that slot before shrinking the pool." >&2
+    # The shrink check runs inside the lock so a concurrent assignment cannot
+    # add a slot above the new pool size between the check and the update.
+    if ! mcp_gateway_mutate --argjson size "$size" '
+      ([.slots | keys[] | tonumber] | max // 0) as $max |
+      if $size < $max then
+        error("slot pool size \($size) is below the highest assigned slot \($max); release that slot before shrinking the pool")
+      else .size = $size end
+    '; then
       return 1
     fi
-    mcp_gateway_mutate --argjson size "$size" '.size = $size'
     size="$(jq -r '.size' <<<"$(mcp_gateway_registry_require)")"
   fi
   mcp_gateway_ensure_tokens "$size"
@@ -296,7 +302,7 @@ mcp_gateway_assign() {
 
 mcp_gateway_unassign() {
   local hash="$1"
-  local current slot
+  local current slot owner_after
   current="$(mcp_gateway_registry_read)"
   if [[ -z "$current" ]]; then
     echo "MCP gateway is not configured." >&2
@@ -307,8 +313,19 @@ mcp_gateway_unassign() {
     echo "No gateway slot is assigned to this workspace."
     return 0
   fi
-  mcp_gateway_mutate --arg slot "$slot" 'del(.slots[$slot])' || return 1
-  echo "Released MCP gateway slot $slot."
+  # Delete conditionally inside the lock so a concurrent takeover of this slot
+  # is never undone by a stale read.
+  mcp_gateway_mutate \
+    --arg slot "$slot" \
+    --arg hash "$hash" \
+    'if (.slots[$slot].workspace_hash // "") == $hash then del(.slots[$slot]) else . end' ||
+    return 1
+  owner_after="$(mcp_gateway_slot_owner "$slot")"
+  if [[ -z "$owner_after" ]]; then
+    echo "Released MCP gateway slot $slot."
+  else
+    echo "Slot $slot was reassigned concurrently; nothing was released." >&2
+  fi
 }
 
 mcp_gateway_slot_state() {
@@ -579,13 +596,6 @@ mcp_gateway_stop() {
     echo "MCP gateway was not running."
   fi
   rm -f "$pid_file"
-}
-
-mcp_gateway_publish_running_note() {
-  mcp_gateway_publish_running || return 0
-  local url
-  url="$(mcp_gateway_public_url)"
-  [[ -z "$url" ]] || echo "Gateway publisher is running for $url."
 }
 
 mcp_gateway_resolve_publish_config() {

@@ -700,6 +700,18 @@ if "$ai_sandbox" mcp "$workspace" --slot 0 \
   exit 1
 fi
 rg -q 'Invalid --slot value' "$test_root/slot-zero.err"
+if "$ai_sandbox" mcp "$workspace" --local --slots 5 \
+  >"$test_root/slots-outside.out" 2>"$test_root/slots-outside.err"; then
+  echo "--slots outside gateway setup was accepted" >&2
+  exit 1
+fi
+rg -q "only valid with 'mcp gateway setup'" "$test_root/slots-outside.err"
+if "$ai_sandbox" mcp "$workspace" --local --dev-insecure \
+  >"$test_root/dev-outside.out" 2>"$test_root/dev-outside.err"; then
+  echo "--dev-insecure outside gateway publish was accepted" >&2
+  exit 1
+fi
+rg -q "only valid with 'mcp gateway publish'" "$test_root/dev-outside.err"
 if "$ai_sandbox" mcp "$workspace" --takeover-slot \
   >"$test_root/takeover-alone.out" 2>"$test_root/takeover-alone.err"; then
   echo "--takeover-slot was accepted without --slot" >&2

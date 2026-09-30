@@ -1252,7 +1252,7 @@ mcp_write_metadata() {
       version: $version,
       transport: $transport,
       publisher: ($publisher | if length > 0 then . else null end),
-      host_port: ($host_port | if length > 0 then . else null end),
+      host_port: ($host_port | if test("^[0-9]+$") then tonumber else null end),
       public_url: ($public_url | if length > 0 then . else null end)
     }' >"$tmp_path"
   mv "$tmp_path" "$path"

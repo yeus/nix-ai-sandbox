@@ -274,31 +274,28 @@ upstream_pid_b="$upstream_reported_pid"
 port_b="$upstream_reported_port"
 
 setup_workspace() {
-  local hash="$1" port="$2" token="$3"
+  local hash="$1" port="$2" token="$3" style="${4:-writer}"
   local runtime="$HOME_STORAGE/.ai-sandbox/mcp-winx/$hash"
   local secret_dir="$SECRETS_STORAGE/mcp/$hash"
   mkdir -p "$runtime/runtime" "$secret_dir"
-  jq -n --argjson port "$port" \
-    '{
-      container: "synthetic-mcp",
-      container_id: "synthetic",
-      profile: "default",
-      reuse_emulator: false,
-      share_home: false,
-      mode: "write",
-      implementation: "winx-code-agent",
-      version: "v0.2.351",
-      transport: "streamable-http",
-      publisher: null,
-      host_port: $port,
-      public_url: null
-    }' >"$runtime/runtime/metadata.json"
+  if [[ "$style" == legacy ]]; then
+    jq -n --arg port "$port" \
+      '{transport: "streamable-http", host_port: $port}' \
+      >"$runtime/runtime/metadata.json"
+  else
+    mcp_write_metadata \
+      "$runtime/runtime/metadata.json" \
+      synthetic write synthetic-mcp 0 default streamable-http \
+      "" "$port" "" 0
+  fi
   printf '%s\n' "$token" >"$secret_dir/bearer-token"
   chmod 0600 "$secret_dir/bearer-token"
 }
 
-setup_workspace "$hash_a" "$port_a" "$token_a"
-setup_workspace "$hash_b" "$port_b" "$token_b"
+# Slot 1 uses the real metadata writer (numeric host_port); slot 2 simulates a
+# pre-existing string-typed metadata file that must keep routing.
+setup_workspace "$hash_a" "$port_a" "$token_a" writer
+setup_workspace "$hash_b" "$port_b" "$token_b" legacy
 
 gw_port="$(pick_port)"
 mcp_gateway_mutate --argjson port "$gw_port" '.port = $port'

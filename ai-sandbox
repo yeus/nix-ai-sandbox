@@ -1552,6 +1552,15 @@ if [[ "$mcp_slots_mode" -eq 1 && "$workspace_explicit" -eq 1 ]]; then
   exit 1
 fi
 
+if [[ -n "$mcp_gateway_slots" && "$mcp_gateway_mode" -ne 1 ]]; then
+  echo "mcp --slots is only valid with 'mcp gateway setup'." >&2
+  exit 1
+fi
+if [[ "$mcp_gateway_dev_insecure" -eq 1 && "$mcp_gateway_mode" -ne 1 ]]; then
+  echo "mcp --dev-insecure is only valid with 'mcp gateway publish'." >&2
+  exit 1
+fi
+
 if [[ "$mcp_gateway_mode" -eq 1 ]]; then
   case "$mcp_gateway_cmd" in
     setup|start|stop|status|endpoints|publish|unpublish) ;;
