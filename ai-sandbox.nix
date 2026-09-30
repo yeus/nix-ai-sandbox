@@ -31,6 +31,15 @@ let
     chmod 0755 "$out/mcp/"*.sh
   '';
 
+  mcpGateway = pkgs.buildGoModule {
+    pname = "ai-sandbox-mcp-gateway";
+    version = "0.1.0";
+    src = ./mcp/gateway;
+    vendorHash = null;
+    ldflags = [ "-s" "-w" ];
+    meta.description = "Host-level slot gateway for ai-sandbox MCP servers";
+  };
+
   aiSandboxScript = pkgs.writeShellScriptBin "ai-sandbox" ''
     export AI_SANDBOX_IMAGE=${lib.escapeShellArg cfg.imageName}
     export AI_SANDBOX_HOME_STORAGE=${lib.escapeShellArg cfg.homeStorage}
@@ -53,6 +62,8 @@ let
       pkgs.curl
       pkgs.jq
       pkgs.libsecret
+      pkgs.cloudflared
+      mcpGateway
     ]}:$PATH
 
     exec ${./ai-sandbox} "$@"

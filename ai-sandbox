@@ -14,6 +14,7 @@ NETWORK_MODE="${AI_SANDBOX_NETWORK_MODE:-host}"
 MCP_LIB_DIR="${AI_SANDBOX_MCP_LIB_DIR:-$SCRIPT_DIR/mcp}"
 
 source "$MCP_LIB_DIR/host.sh"
+source "$MCP_LIB_DIR/gateway.sh"
 
 mkdir -p "$STATE_DIR"
 
@@ -47,6 +48,20 @@ Usage:
     Tunnel IDs are remembered per workspace; the runtime API key stays in Secret Service.
     Tunnels default to an isolated MCP home; --share-home exposes the sandbox home.
     Cloudflare named tunnels are stable; cloudflare-quick URLs are temporary.
+
+  ai-sandbox mcp [WORKSPACE] --slot N [--takeover-slot]
+  ai-sandbox mcp [WORKSPACE] --unslot
+  ai-sandbox mcp slots [--json]
+    Bind a workspace to a persistent public gateway slot (local HTTP backend)
+    and inspect the shared slot registry.
+    Slot URLs are stable; the gateway injects the workspace bearer token.
+
+  ai-sandbox mcp gateway setup [--slots N]
+  ai-sandbox mcp gateway start|stop|status|endpoints [--json]
+  ai-sandbox mcp gateway publish cloudflare [--public-url URL] --dev-insecure
+  ai-sandbox mcp gateway unpublish
+    Manage the host-level MCP slot gateway and its shared Cloudflare publisher.
+    Public publishing is development-only until OAuth lands at the gateway.
 
   ai-sandbox shell [WORKSPACE] [--flake PATH] [--network host|bridge] [--instance NAME] [--android|--emulator|--android-emulator] [--android-gpu] [-- COMMAND [ARGS...]]
     Start/attach the sandbox and open an interactive shell (or run command after --).
@@ -1026,6 +1041,15 @@ mcp_reuse_emulator=0
 mcp_share_home=0
 mcp_tunnel_prompt=0
 mcp_android_selected=0
+mcp_slot=""
+mcp_takeover_slot=0
+mcp_unslot=0
+mcp_slots_mode=0
+mcp_gateway_mode=0
+mcp_gateway_cmd=""
+mcp_gateway_slots=""
+mcp_gateway_publisher=""
+mcp_gateway_dev_insecure=0
 network_selected=0
 android_mode=0
 emulator_mode=0
@@ -1258,6 +1282,36 @@ while [[ $# -gt 0 ]]; do
       mcp_share_home=1
       shift
       ;;
+    --slot)
+      [[ "$cmd" == "mcp" ]] || { echo "--slot is only valid with mcp" >&2; exit 1; }
+      shift
+      [[ $# -gt 0 ]] || { echo "--slot requires a slot number" >&2; exit 1; }
+      mcp_slot="$1"
+      mcp_local_selected=1
+      shift
+      ;;
+    --takeover-slot)
+      [[ "$cmd" == "mcp" ]] || { echo "--takeover-slot is only valid with mcp" >&2; exit 1; }
+      mcp_takeover_slot=1
+      shift
+      ;;
+    --unslot)
+      [[ "$cmd" == "mcp" ]] || { echo "--unslot is only valid with mcp" >&2; exit 1; }
+      mcp_unslot=1
+      shift
+      ;;
+    --slots)
+      [[ "$cmd" == "mcp" ]] || { echo "--slots is only valid with mcp" >&2; exit 1; }
+      shift
+      [[ $# -gt 0 ]] || { echo "--slots requires a slot count" >&2; exit 1; }
+      mcp_gateway_slots="$1"
+      shift
+      ;;
+    --dev-insecure)
+      [[ "$cmd" == "mcp" ]] || { echo "--dev-insecure is only valid with mcp" >&2; exit 1; }
+      mcp_gateway_dev_insecure=1
+      shift
+      ;;
     --detach)
       [[ "$cmd" == "mcp" ]] || { echo "--detach is only valid with mcp" >&2; exit 1; }
       mcp_detach=1
@@ -1357,6 +1411,30 @@ while [[ $# -gt 0 ]]; do
           exit 1
         fi
       elif [[ "$cmd" == "mcp" ]]; then
+        if [[ "$mcp_gateway_mode" -eq 1 ]]; then
+          if [[ -z "$mcp_gateway_cmd" ]]; then
+            mcp_gateway_cmd="$1"
+            shift
+            continue
+          fi
+          if [[ "$mcp_gateway_cmd" == publish && "$1" == cloudflare ]]; then
+            mcp_gateway_publisher=cloudflare
+            shift
+            continue
+          fi
+          echo "mcp gateway accepts exactly one subcommand." >&2
+          exit 1
+        fi
+        if [[ "$workspace_explicit" -eq 0 && "$mcp_slots_mode" -eq 0 && "$1" == "gateway" ]]; then
+          mcp_gateway_mode=1
+          shift
+          continue
+        fi
+        if [[ "$workspace_explicit" -eq 0 && "$mcp_slots_mode" -eq 0 && "$1" == "slots" ]]; then
+          mcp_slots_mode=1
+          shift
+          continue
+        fi
         [[ "$workspace_explicit" -eq 0 ]] || {
           echo "mcp accepts at most one WORKSPACE argument." >&2
           exit 1
@@ -1417,8 +1495,8 @@ if [[ -n "$mcp_port" && "$mcp_local_selected" -ne 1 ]]; then
   echo "mcp --port requires --local." >&2
   exit 1
 fi
-if [[ -n "$mcp_public_url" && "$mcp_publish" != cloudflare ]]; then
-  echo "mcp --public-url requires --publish cloudflare." >&2
+if [[ -n "$mcp_public_url" && "$mcp_publish" != cloudflare && "$mcp_gateway_cmd" != publish ]]; then
+  echo "mcp --public-url requires --publish cloudflare or 'mcp gateway publish'." >&2
   exit 1
 fi
 if [[ -n "$mcp_connection" && ! "$mcp_connection" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$ ]]; then
@@ -1438,6 +1516,73 @@ fi
 if [[ "$mcp_share_home" -eq 1 && "$mcp_tunnel_selected" -ne 1 ]]; then
   echo "mcp --share-home requires --tunnel." >&2
   exit 1
+fi
+
+if [[ -n "$mcp_slot" && ! "$mcp_slot" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Invalid --slot value: $mcp_slot (expected an integer >= 1)." >&2
+  exit 1
+fi
+if [[ "$mcp_takeover_slot" -eq 1 && -z "$mcp_slot" ]]; then
+  echo "mcp --takeover-slot requires --slot." >&2
+  exit 1
+fi
+if [[ -n "$mcp_gateway_slots" && ! "$mcp_gateway_slots" =~ ^[1-9][0-9]?$ ]]; then
+  echo "Invalid gateway slot count: $mcp_gateway_slots (expected 1-99)." >&2
+  exit 1
+fi
+
+if [[ "$mcp_unslot" -eq 1 ]] &&
+  { [[ "$mcp_transport_count" -ne 0 ]] || [[ -n "$mcp_slot" ]] ||
+    [[ "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 || "$mcp_sessions" -eq 1 ||
+       -n "$mcp_attach_id" || "$mcp_show_token" -eq 1 || "$mcp_mode_selected" -eq 1 ||
+       "$mcp_json" -eq 1 ]]; }; then
+  echo "mcp --unslot cannot be combined with other MCP start, status, or stop options." >&2
+  exit 1
+fi
+
+if [[ "$mcp_slots_mode" -eq 1 ]] &&
+  { [[ "$mcp_transport_count" -ne 0 ]] || [[ -n "$mcp_slot" ]] ||
+    [[ "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 || "$mcp_sessions" -eq 1 ||
+       -n "$mcp_attach_id" || "$mcp_show_token" -eq 1 || "$mcp_mode_selected" -eq 1 ]]; }; then
+  echo "mcp slots cannot be combined with MCP start, status, or stop options." >&2
+  exit 1
+fi
+if [[ "$mcp_slots_mode" -eq 1 && "$workspace_explicit" -eq 1 ]]; then
+  echo "mcp slots does not accept a WORKSPACE argument." >&2
+  exit 1
+fi
+
+if [[ "$mcp_gateway_mode" -eq 1 ]]; then
+  case "$mcp_gateway_cmd" in
+    setup|start|stop|status|endpoints|publish|unpublish) ;;
+    *)
+      echo "mcp gateway requires a subcommand: setup, start, stop, status, endpoints, publish, or unpublish." >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$workspace_explicit" -eq 1 ]]; then
+    echo "mcp gateway does not accept a WORKSPACE argument." >&2
+    exit 1
+  fi
+  if [[ "$mcp_transport_count" -ne 0 || "$mcp_status" -eq 1 || "$mcp_stop" -eq 1 ||
+        "$mcp_sessions" -eq 1 || -n "$mcp_attach_id" || "$mcp_show_token" -eq 1 ||
+        "$mcp_mode_selected" -eq 1 || -n "$mcp_slot" || "$mcp_unslot" -eq 1 ||
+        "$mcp_slots_mode" -eq 1 || -n "$mcp_connection" ]]; then
+    echo "mcp gateway cannot be combined with MCP start, status, or stop options." >&2
+    exit 1
+  fi
+  if [[ -n "$mcp_gateway_slots" && "$mcp_gateway_cmd" != setup ]]; then
+    echo "mcp gateway --slots is only valid with setup." >&2
+    exit 1
+  fi
+  if [[ -n "$mcp_public_url" && "$mcp_gateway_cmd" != publish ]]; then
+    echo "mcp gateway --public-url is only valid with publish." >&2
+    exit 1
+  fi
+  if [[ "$mcp_gateway_dev_insecure" -eq 1 && "$mcp_gateway_cmd" != publish ]]; then
+    echo "mcp gateway --dev-insecure is only valid with publish." >&2
+    exit 1
+  fi
 fi
 
 if [[ "$mcp_status" -eq 1 && "$mcp_stop" -eq 1 ]]; then
@@ -1525,7 +1670,8 @@ if [[ "$cmd" == "mcp" ]]; then
     exit 1
   fi
   if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 && "$mcp_sessions" -eq 0 &&
-    -z "$mcp_attach_id" && "$mcp_show_token" -eq 0 && "$mcp_transport_count" -eq 0 ]]; then
+    -z "$mcp_attach_id" && "$mcp_show_token" -eq 0 && "$mcp_transport_count" -eq 0 &&
+    "$mcp_unslot" -eq 0 && "$mcp_slots_mode" -eq 0 && "$mcp_gateway_mode" -eq 0 ]]; then
     echo "Start Winx MCP with --local, --publish cloudflare, or --tunnel." >&2
     exit 1
   fi
@@ -1801,7 +1947,8 @@ case "$cmd" in
   mcp)
     if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 &&
       "$mcp_sessions" -eq 0 && -z "$mcp_attach_id" &&
-      "$mcp_show_token" -eq 0 ]]; then
+      "$mcp_show_token" -eq 0 && "$mcp_unslot" -eq 0 &&
+      "$mcp_slots_mode" -eq 0 && "$mcp_gateway_mode" -eq 0 ]]; then
       ensure_image_exists
     fi
     ;;
@@ -1851,6 +1998,20 @@ workspace_hash="$(echo -n "$workspace" | sha256sum | cut -c1-12)"
 
 if [[ "$cmd" == "mcp" ]]; then
   mcp_require_home_path
+  if [[ "$mcp_gateway_mode" -eq 1 ]]; then
+    mcp_gateway_dispatch \
+      "$mcp_gateway_cmd" "$mcp_gateway_slots" \
+      "$mcp_public_url" "$mcp_gateway_dev_insecure" "$mcp_json"
+    exit $?
+  fi
+  if [[ "$mcp_slots_mode" -eq 1 ]]; then
+    mcp_gateway_print_slots "$mcp_json"
+    exit $?
+  fi
+  if [[ "$mcp_unslot" -eq 1 ]]; then
+    mcp_gateway_unassign "$workspace_hash"
+    exit $?
+  fi
   if [[ "$mcp_status" -eq 0 && "$mcp_stop" -eq 0 && "$mount_root" != "$workspace" ]]; then
     echo "ai-sandbox mcp cannot expose a submodule through an expanded parent mount." >&2
     echo "Run it from the top-level mounted repository instead: $mount_root" >&2
@@ -2420,6 +2581,32 @@ run_mcp() {
       mcp_prompt_tunnel_selection \
         "$workspace_hash" mcp_tunnel_id mcp_runtime_api_key || return 1
       mcp_tunnel_prompt=0
+    fi
+  fi
+
+  if [[ -n "$mcp_slot" ]]; then
+    local slot_owner slot_owner_workspace slot_answer slot_takeover="$mcp_takeover_slot"
+    slot_owner="$(mcp_gateway_slot_owner "$mcp_slot")"
+    if [[ -n "$slot_owner" && "$slot_owner" != "$workspace_hash" ]]; then
+      slot_owner_workspace="$(mcp_gateway_slot_workspace "$mcp_slot")"
+      if [[ "$slot_takeover" -eq 1 ]]; then
+        :
+      elif [[ -t 0 && -t 2 ]]; then
+        read -r -p "Gateway slot $mcp_slot is assigned to ${slot_owner_workspace:-$slot_owner}. Take it over? [y/N]: " slot_answer
+        [[ "$slot_answer" == y || "$slot_answer" == Y ]] || {
+          echo "Slot assignment cancelled." >&2
+          return 1
+        }
+        slot_takeover=1
+      else
+        echo "Gateway slot $mcp_slot is already assigned to ${slot_owner_workspace:-$slot_owner}." >&2
+        echo "Reassign it explicitly with --takeover-slot." >&2
+        return 1
+      fi
+    fi
+    if ! mcp_gateway_assign \
+      "$workspace_hash" "$workspace" "$mcp_connection" "$mcp_slot" "$slot_takeover"; then
+      return 1
     fi
   fi
 

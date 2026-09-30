@@ -533,6 +533,134 @@ the list. If the app cannot discover tools or make calls, leave
 Tunnel UI URL for `READY` health. An active tunnel cannot be switched to
 another ID; stop it before starting with a different one.
 
+## Shared MCP gateway slots
+
+`ais mcp --tunnel` registers one OpenAI tunnel and one ChatGPT app per
+workspace. That does not scale to many projects: every new sandbox would need a
+new tunnel and a new ChatGPT app. The shared slot gateway gives you a fixed pool
+of stable public endpoints instead:
+
+```text
+Chat A -> mcp1 -> /slot/1/<capability>/mcp ─┐
+Chat B -> mcp2 -> /slot/2/<capability>/mcp ─┼─ one HTTPS ingress
+Chat C -> mcp3 -> /slot/3/<capability>/mcp ─┘   (one cloudflared)
+                                             │
+                                  MCP slot gateway (host)
+                                  127.0.0.1:18082
+                                             │
+                      ┌──────────────────────┼──────────────────────┐
+                      │                      │                      │
+                   slot 1                 slot 2                 slot 3
+                      │                      │                      │
+              127.0.0.1:portA        127.0.0.1:portB        127.0.0.1:portC
+                      │                      │                      │
+                  Winx A                Winx B                Winx C
+             (workspace A)         (workspace B)         (workspace C)
+```
+
+Each slot reuses the existing `ais mcp --local` backend: its own dedicated MCP
+container, Winx Streamable HTTP server, and host-only bearer token. The gateway
+resolves the workspace from the slot number alone and injects that workspace's
+bearer token before forwarding. The calling model only ever sees the normal
+Winx tools: there is no `workspace=` argument and no way to select another slot.
+
+The gateway is a host-level process, not part of any workspace container, so
+stopping a workspace never affects other slots. It is deliberately independent
+of the OpenAI Secure MCP Tunnel transport; that transport remains available
+unchanged.
+
+### Gateway lifecycle
+
+```bash
+ais mcp gateway setup --slots 5
+ais mcp gateway start
+ais mcp gateway status
+ais mcp gateway endpoints
+```
+
+`setup` creates the host-only slot registry under
+`$SECRETS_STORAGE/mcp/gateway/` (0700 directory, 0600 files) with one capability
+token per slot. `start` launches the host-level proxy and records its PID under
+the ai-sandbox state directory. `status` reports every slot and its
+READY/STOPPED state; `endpoints` prints the local registration URLs. Slot
+numbers are stable and never shuffled.
+
+### Binding workspaces to slots
+
+```bash
+ais mcp . --slot 1
+ais mcp ~/project-b --slot 2
+ais mcp slots
+ais mcp . --unslot
+```
+
+`--slot N` implies the local Streamable HTTP transport, starts the workspace
+MCP, and records the slot to workspace mapping. The important semantics:
+
+- one slot maps to at most one workspace; one workspace maps to at most one slot
+- an occupied slot refuses assignment; an interactive terminal is offered an
+  explicit takeover prompt and scripts must pass `--takeover-slot`
+- stopping a workspace keeps its slot mapping; the slot then returns HTTP 503
+  `slot_unavailable` until that workspace starts again
+- `--unslot` is the explicit release
+- restarting the gateway preserves all mappings and capability tokens
+
+### Shared Cloudflare publishing
+
+One named Cloudflare Tunnel can serve the whole gateway. Configure its public
+hostname origin as `http://127.0.0.1:18082`, then run:
+
+```bash
+ais mcp gateway publish cloudflare \
+  --public-url https://mcp.example.com --dev-insecure
+ais mcp gateway unpublish
+```
+
+The gateway publisher is a separate host-level `cloudflared` process with its
+own token and URL under `mcp/gateway/`. Starting or stopping an individual
+workspace never restarts `cloudflared`, and restarting the publisher never
+changes slot assignments or capability URLs.
+
+### Security model and current limits
+
+- Every slot request needs its per-slot capability token, including requests
+  from host loopback. There is no anonymous mode.
+- The gateway strips any client `Authorization` header and injects the internal
+  workspace bearer token. External clients never see it; it is never passed in
+  process arguments and never written to status output.
+- The registry stores hashes, paths, and connection names, never bearer or
+  capability tokens. Tokens live in separate 0600 files, registry updates are
+  atomic and `flock`-guarded, and symlinked state is rejected.
+- ChatGPT developer-mode apps can only use OAuth, No-auth, or Mixed
+  authentication; they cannot send static API keys or custom mTLS certificates.
+  Proper OAuth 2.1 at the gateway is not implemented yet, so public publishing
+  requires the explicit `--dev-insecure` flag and is development-only.
+  Capability URLs are bearer credentials embedded in the URL: anyone holding one
+  can run Bash in that workspace. Treat them like passwords and do not use this
+  mode for anything you would not expose to the internet.
+- OAuth 2.1 at the gateway is the intended next step; the slot routing and
+  registry do not change when it lands.
+
+### Manual ChatGPT acceptance test
+
+This procedure has not yet been validated against ChatGPT from this repository;
+run it before treating the gateway as production-ready.
+
+1. `ais mcp gateway setup --slots 3` and `ais mcp gateway start`.
+2. `ais mcp gateway publish cloudflare --public-url https://<host> --dev-insecure`.
+3. Register three developer-mode apps with the URLs from
+   `ais mcp gateway endpoints`: `mcp1` -> slot 1, `mcp2` -> slot 2,
+   `mcp3` -> slot 3. Choose **No auth**.
+4. Start three projects concurrently with `--slot 1`, `--slot 2`, `--slot 3`.
+5. Open three independent conversations and select exactly one app in each.
+6. Make simultaneous file/shell calls and verify each chat sees only its own
+   project.
+7. Restart one project: its ChatGPT app URL must keep working when it returns.
+8. Stop and start the gateway and `cloudflared`: none of the three app URLs
+   change.
+9. Reassign slot 3 with `--takeover-slot` to another project: the existing
+   `mcp3` app reaches the new project without re-registration.
+
 ### Container boundary
 
 The pinned, checksum-verified tunnel client launches pinned Winx over stdio.

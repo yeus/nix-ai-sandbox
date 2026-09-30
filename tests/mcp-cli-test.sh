@@ -662,3 +662,158 @@ jq -e --arg id "$sixth_tunnel_id" --arg ws "$workspace_seven_hash" \
 rg -q "$sixth_tunnel_id" \
   "$AI_SANDBOX_HOME_STORAGE/.ai-sandbox/mcp-winx/$workspace_seven_hash/tunnel/metadata.json"
 "$ai_sandbox" mcp "$workspace_seven" --stop >"$test_root/picker-stop.out"
+
+# The shared slot gateway reuses the local HTTP backend behind stable slots.
+workspace_two_hash="$(printf '%s' "$workspace_two" | sha256sum | cut -c1-12)"
+"$ai_sandbox" mcp gateway setup --slots 3 \
+  >"$test_root/gateway-setup.out"
+rg -q 'configured with 3 slots' "$test_root/gateway-setup.out"
+gateway_dir="$AI_SANDBOX_SECRETS_STORAGE/mcp/gateway"
+gateway_registry="$gateway_dir/registry.json"
+[[ "$(stat -c %a "$gateway_dir")" == 700 ]] ||
+  { echo "gateway state directory is not 0700" >&2; exit 1; }
+[[ "$(stat -c %a "$gateway_registry")" == 600 ]] ||
+  { echo "gateway registry is not 0600" >&2; exit 1; }
+[[ "$(stat -c %a "$gateway_dir/tokens/1")" == 600 ]] ||
+  { echo "gateway slot token is not 0600" >&2; exit 1; }
+jq -e '.size == 3 and .auth == "capability" and (.slots | length) == 0' \
+  "$gateway_registry" >/dev/null
+
+"$ai_sandbox" mcp gateway status --json >"$test_root/gateway-status.json"
+jq -e '.gateway.auth == "capability" and .gateway.running == false and
+  (.slots | length) == 3 and ([.slots[].assigned] | all(. == false))' \
+  "$test_root/gateway-status.json" >/dev/null
+if rg -q 'bearer-token-' "$test_root/gateway-status.json"; then
+  echo "gateway status leaked an internal bearer token" >&2
+  exit 1
+fi
+
+if "$ai_sandbox" mcp gateway start >"$test_root/gateway-start.out" 2>"$test_root/gateway-start.err"; then
+  echo "gateway start succeeded without a gateway binary" >&2
+  exit 1
+fi
+rg -q 'gateway binary not found' "$test_root/gateway-start.err"
+
+if "$ai_sandbox" mcp "$workspace" --slot 0 \
+  >"$test_root/slot-zero.out" 2>"$test_root/slot-zero.err"; then
+  echo "Invalid slot number was accepted" >&2
+  exit 1
+fi
+rg -q 'Invalid --slot value' "$test_root/slot-zero.err"
+if "$ai_sandbox" mcp "$workspace" --takeover-slot \
+  >"$test_root/takeover-alone.out" 2>"$test_root/takeover-alone.err"; then
+  echo "--takeover-slot was accepted without --slot" >&2
+  exit 1
+fi
+rg -q 'requires --slot' "$test_root/takeover-alone.err"
+if "$ai_sandbox" mcp "$workspace" --slot 1 --tunnel \
+  >"$test_root/slot-tunnel.out" 2>"$test_root/slot-tunnel.err"; then
+  echo "--slot combined with --tunnel was accepted" >&2
+  exit 1
+fi
+rg -q 'mutually exclusive' "$test_root/slot-tunnel.err"
+
+"$ai_sandbox" mcp "$workspace" --slot 1 \
+  >"$test_root/slot-one.out" 2>"$test_root/slot-one.err"
+rg -q 'Transport: Streamable HTTP' "$test_root/slot-one.out"
+jq -e --arg hash "$workspace_hash" \
+  '.slots["1"].workspace_hash == $hash and .slots["1"].connection == "mcp1"' \
+  "$gateway_registry" >/dev/null
+if rg -q 'bearer-token-' "$gateway_registry"; then
+  echo "gateway registry contains an internal bearer token" >&2
+  exit 1
+fi
+"$ai_sandbox" mcp slots --json >"$test_root/slots.json"
+jq -e '.slots[0].assigned == true and .slots[0].app == "mcp1" and
+  .slots[0].state == "stopped" and .slots[1].assigned == false' \
+  "$test_root/slots.json" >/dev/null
+
+# Stopping the workspace keeps the slot mapping and the gateway independent.
+"$ai_sandbox" mcp "$workspace" --stop >"$test_root/slot-one-stop.out"
+jq -e --arg hash "$workspace_hash" \
+  '.slots["1"].workspace_hash == $hash' "$gateway_registry" >/dev/null
+
+if "$ai_sandbox" mcp "$workspace_two" --slot 1 \
+  >"$test_root/slot-conflict.out" 2>"$test_root/slot-conflict.err"; then
+  echo "Occupied gateway slot was assigned without takeover" >&2
+  exit 1
+fi
+rg -q -- '--takeover-slot' "$test_root/slot-conflict.err"
+
+# Interactive starts offer an explicit takeover prompt.
+run_mcp_interactive "$test_root/slot-interactive.out" "y
+" "$workspace_two" --slot 1
+rg -q 'Take it over?' "$test_root/slot-interactive.out"
+jq -e --arg hash "$workspace_two_hash" \
+  '.slots["1"].workspace_hash == $hash' "$gateway_registry" >/dev/null
+
+if "$ai_sandbox" mcp "$workspace_two" --slot 2 \
+  >"$test_root/slot-second.out" 2>"$test_root/slot-second.err"; then
+  echo "A workspace was assigned a second slot" >&2
+  exit 1
+fi
+rg -q 'already assigned to slot 1' "$test_root/slot-second.err"
+"$ai_sandbox" mcp "$workspace_two" --slot 2 --takeover-slot \
+  >"$test_root/slot-move.out" 2>"$test_root/slot-move.err"
+jq -e '.slots["1"] == null and (.slots["2"].workspace_hash == "'"$workspace_two_hash"'")' \
+  "$gateway_registry" >/dev/null
+
+"$ai_sandbox" mcp gateway endpoints --json >"$test_root/gateway-endpoints.json"
+jq -e '(.endpoints | length) == 1 and
+  (.endpoints[0].local_url | test("/slot/2/[a-f0-9]{64}/mcp$"))' \
+  "$test_root/gateway-endpoints.json" >/dev/null
+if rg -q 'bearer-token-' "$test_root/gateway-endpoints.json"; then
+  echo "gateway endpoints leaked an internal bearer token" >&2
+  exit 1
+fi
+
+"$ai_sandbox" mcp "$workspace_two" --unslot >"$test_root/slot-release.out"
+rg -q 'Released MCP gateway slot 2' "$test_root/slot-release.out"
+jq -e '.slots | length == 0' "$gateway_registry" >/dev/null
+
+
+# Shared gateway publishing is development-only and keeps its token out of argv.
+cat >"$test_root/bin/cloudflared" <<'CLOUDFLARED_SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" >"$AI_SANDBOX_TEST_ROOT/cloudflared.args"
+env | rg '^TUNNEL_TOKEN=' >"$AI_SANDBOX_TEST_ROOT/cloudflared.env" || true
+echo "INF Registered tunnel connection connIndex=0"
+sleep 60
+CLOUDFLARED_SCRIPT
+chmod +x "$test_root/bin/cloudflared"
+if "$ai_sandbox" mcp gateway publish cloudflare \
+  >"$test_root/publish-insecure.out" 2>"$test_root/publish-insecure.err"; then
+  echo "Gateway publishing was accepted without --dev-insecure" >&2
+  exit 1
+fi
+rg -q 'disabled by default' "$test_root/publish-insecure.err"
+
+printf '%s\n' synthetic-gateway-token \
+  >"$gateway_dir/cloudflare-tunnel-token"
+chmod 0600 "$gateway_dir/cloudflare-tunnel-token"
+sleep 60 &
+fake_gateway_pid=$!
+mkdir -p "$AI_SANDBOX_STATE_DIR/mcp-gateway"
+printf '%s\n' "$fake_gateway_pid" \
+  >"$AI_SANDBOX_STATE_DIR/mcp-gateway/gateway.pid"
+"$ai_sandbox" mcp gateway publish cloudflare \
+  --public-url https://mcp.example.test --dev-insecure \
+  >"$test_root/publish-gateway.out" 2>"$test_root/publish-gateway.err"
+rg -q 'Gateway publisher running' "$test_root/publish-gateway.out"
+rg -q 'development-only' "$test_root/publish-gateway.err"
+if rg -q 'synthetic-gateway-token' "$test_root/cloudflared.args"; then
+  echo "Gateway publishing leaked the tunnel token to process arguments" >&2
+  exit 1
+fi
+rg -q '^TUNNEL_TOKEN=synthetic-gateway-token$' "$test_root/cloudflared.env"
+"$ai_sandbox" mcp gateway status --json \
+  >"$test_root/gateway-publish-status.json"
+jq -e '.gateway.publishing == true and
+  .gateway.public_url == "https://mcp.example.test"' \
+  "$test_root/gateway-publish-status.json" >/dev/null
+"$ai_sandbox" mcp gateway unpublish >"$test_root/gateway-unpublish.out"
+rg -q 'Stopped the gateway Cloudflare publisher' \
+  "$test_root/gateway-unpublish.out"
+kill "$fake_gateway_pid" 2>/dev/null || true
+rm -f "$AI_SANDBOX_STATE_DIR/mcp-gateway/gateway.pid"
