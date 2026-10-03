@@ -1778,7 +1778,7 @@ case "$cmd" in
     container_mode="$(container_network_mode "$target_container")"
     host_default_route="$(ip route show default 2>/dev/null | head -n1 || true)"
     host_dns="$(awk '/^nameserver /{print $2}' /etc/resolv.conf 2>/dev/null | xargs || true)"
-    container_dns="$(podman exec "$target_container" /bin/bash -lc "awk '/^nameserver /{print \\$2}' /etc/resolv.conf | xargs" 2>/dev/null || true)"
+    container_dns="$(podman exec "$target_container" /bin/bash -lc "awk '/^nameserver /{print \$2}' /etc/resolv.conf | xargs" 2>/dev/null || true)"
     container_proxy="$(podman exec "$target_container" /bin/bash -lc "env | grep -Ei '^(http|https|no)_proxy='" 2>/dev/null || true)"
 
     dns_status="fail"
@@ -2141,7 +2141,11 @@ if [[ "$cmd" == "mcp" ]]; then
   fi
   if [[ "$mcp_android_selected" -eq 1 ]]; then
     if [[ -f "$mcp_metadata" && "$mcp_recorded_container" != "$container_name" ]]; then
-      echo "MCP is recorded for another container; stop it before changing Android mode." >&2
+      echo "MCP state for this workspace records a different container:" >&2
+      printf '  recorded: %s\n' "${mcp_recorded_container:-<unknown>}" >&2
+      printf '  requested: %s\n' "$container_name" >&2
+      echo "Stop the recorded MCP and clear its state with:" >&2
+      echo "  ais mcp --stop" >&2
       exit 1
     fi
   elif [[ "$mcp_recorded_reuse" == true ]]; then
