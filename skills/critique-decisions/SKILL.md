@@ -12,6 +12,10 @@ Ground every objection in evidence, an invariant, or a concrete consequence.
 
 1. Inspect the owning source, current behavior, and relevant constraints before judging the idea.
 2. Separate verified facts, user preferences, and unverified assumptions.
+   Treat every substantive user claim and preferred direction as a hypothesis. Formulate the
+   strongest plausible counterargument and test it against repository evidence and invariants.
+   Report objections that survive; when none survive, explicitly say the claim holds. Do not
+   manufacture disagreement merely to argue against the user.
 3. State what holds up and why. Do not hide legitimate strengths merely to sound critical.
 4. Identify questionable assumptions, unnecessary layers, hidden state, duplicated ownership, and
    likely failure modes.

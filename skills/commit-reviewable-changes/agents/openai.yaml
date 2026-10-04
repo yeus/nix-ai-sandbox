@@ -1,0 +1,3 @@
+interface:
+  display_name: "Commit Reviewable Changes"
+  short_description: "Commit finished changes in focused batches"

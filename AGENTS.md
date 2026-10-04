@@ -126,6 +126,28 @@ If rules conflict, follow the higher-priority rule and state the tradeoff briefl
   update its implementation and verification paths in the same change; add a
   focused test before marking it `tracked`.
 
+## Sensitive data and generated diagnostics
+
+- Treat logs, diagnostic output, crash reports, database dumps, configuration
+  snapshots, certificates, keys, device and folder identifiers, network
+  addresses, local paths, directory listings, and filenames as potentially
+  sensitive, even when they do not contain passwords or access tokens.
+- Never stage or commit generated logs or diagnostic artifacts unless the user
+  explicitly intends to publish them and their complete contents have been
+  reviewed. Add recurring generated artifacts to the owning repository's
+  `.gitignore` at their upstream source.
+- Tests and diagnostics must use synthetic fixtures and redacted output by
+  default. Never capture inventories, paths, filenames, identifiers, or network
+  details from a real personal or production peer in repository artifacts.
+- Before staging, committing, or pushing, inspect untracked files and the exact
+  staged diff. Scan added content for credentials, private identifiers,
+  personal filenames, local paths, and network metadata; do not assume a file
+  is safe based on its extension or name.
+- If private data is discovered in Git, stop further publication immediately.
+  Remove it from the current tree, assess whether secrets require rotation, and
+  treat already-pushed history, tags, caches, clones, and forks as separate
+  copies requiring cleanup.
+
 ## Critical evaluation
 
 - Treat every user request and proposed solution as a hypothesis to evaluate,
