@@ -42,6 +42,7 @@ So instead of trusting every coding-agent plugin, you isolate the whole editor e
 - uses bind-mounted host directories for `/nix` and sandbox home (defaults: `~/.cache/ai-sandbox/nix` and `~/.cache/ai-sandbox/home`)
 - mounts the current project at `/workspace`
 - mounts `/tmp/ais/<container-name>` from the host at `/tmp` inside each container
+- inherits the host timezone when creating a container (`--tz=local`)
 - if the project is a Git submodule, mounts the top superproject at `/workspace` and opens the submodule path inside it (preserves nested submodule `.git` path resolution)
 - if a flake is available, launches via `nix develop`
 - if no flake is available, launches plain VS Code / plain shell
@@ -66,6 +67,12 @@ Existing containers keep their original mounts. Recreate a container before
 expecting its `/tmp` to appear on the host. `ai-sandbox reset-container .`
 removes all containers for the current workspace, but does not remove
 `/tmp/ais` files. This also discards any state stored only in those containers.
+
+The sandbox shares the host's clock and uses the host timezone selected when
+the container is created. Daylight-saving transitions follow that timezone.
+Recreate existing containers to pick up this setting or a later change to the
+host timezone. Applications that explicitly select UTC or another timezone
+keep their own setting.
 
 ## Everyday use
 

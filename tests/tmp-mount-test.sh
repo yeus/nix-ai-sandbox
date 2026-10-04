@@ -12,6 +12,8 @@ export AI_SANDBOX_HOME_STORAGE="$test_root/home"
 export AI_SANDBOX_NIX_STORAGE="$test_root/nix"
 export AI_SANDBOX_TMP_ROOT="$test_root/host-tmp"
 export AI_SANDBOX_TEST_COMMAND_LOG="$test_root/commands.log"
+export XDG_DATA_HOME="$test_root/data"
+export XDG_CONFIG_HOME="$test_root/config"
 export PATH="$test_root/bin:/usr/bin:/bin"
 
 cat >"$test_root/bin/podman" <<'EOF'
@@ -36,6 +38,8 @@ first_dir="$(find "$AI_SANDBOX_TMP_ROOT" \
 [[ "$(stat -c %a "$AI_SANDBOX_TMP_ROOT")" == 700 ]]
 [[ "$(stat -c %a "$first_dir")" == 1777 ]]
 grep -qF "<$first_dir:/tmp" "$AI_SANDBOX_TEST_COMMAND_LOG"
+# Local-time software must inherit the host timezone on container creation.
+grep -qF '<--tz=local>' "$AI_SANDBOX_TEST_COMMAND_LOG"
 
 "$ai_sandbox" shell "$test_root/workspace" \
   --instance second -- true >/dev/null

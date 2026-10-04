@@ -2333,6 +2333,7 @@ fi
 common_args=(
   --name "$container_name"
   --init
+  --tz=local
   --userns=keep-id
   --user "$(id -u):$(id -g)"
   --group-add keep-groups
