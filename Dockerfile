@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y \
     util-linux \
     wget \
     xauth \
+    xclip \
     xdg-utils \
     xz-utils \
     zip \
