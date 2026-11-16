@@ -25,6 +25,8 @@ cleanup() {
 trap cleanup EXIT
 export TUNNEL_CLIENT_STATE_DIR="$tunnel_dir/state"
 
+/usr/local/bin/ai-sandbox-mcp-tunnel-state-guard "$tunnel_dir/state" workspace
+
 if [[ -x "$client" ]] &&
   "$client" runtimes status workspace --json >"$status_file" 2>/dev/null; then
   jq -s \

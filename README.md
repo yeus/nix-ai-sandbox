@@ -525,6 +525,11 @@ ais mcp --status --json
 ais mcp --stop
 ```
 
+The tunnel runtime records its local process ID in the shared sandbox home. After
+a container restart that ID can belong to another process, so status, start, and
+stop first check that the live process is the expected `tunnel-client` for this
+workspace. A stale entry is cleared instead of being trusted or signalled.
+
 To list Winx shell sessions or follow one specific thread from another
 terminal, run:
 

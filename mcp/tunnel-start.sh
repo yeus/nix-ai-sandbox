@@ -29,6 +29,8 @@ mkdir -p "$state_dir" "$profile_dir"
 chmod 0700 "$tunnel_dir" "$state_dir" "$profile_dir"
 export TUNNEL_CLIENT_STATE_DIR="$state_dir"
 
+/usr/local/bin/ai-sandbox-mcp-tunnel-state-guard "$state_dir" workspace
+
 if ! "$client" runtimes connect --json \
   --alias workspace \
   --profile workspace \

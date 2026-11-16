@@ -14,6 +14,7 @@ esac
 
 client="/sandbox-home/.local/share/ai-sandbox/mcp/tunnel-client/$version-$platform/tunnel-client"
 export TUNNEL_CLIENT_STATE_DIR="$tunnel_dir/state"
+/usr/local/bin/ai-sandbox-mcp-tunnel-state-guard "$tunnel_dir/state" workspace
 if [[ -x "$client" ]]; then
   "$client" runtimes stop workspace --json >/dev/null 2>&1 || true
 fi
